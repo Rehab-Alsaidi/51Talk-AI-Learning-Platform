@@ -1,5 +1,4 @@
 # 51Talk-AI-Learning-Platform
-# 51Talk AI Learning Platform
 
 A comprehensive Flask-based learning platform with AI integration, designed for interactive educational experiences.
 
@@ -21,7 +20,7 @@ The 51Talk AI Learning Platform is a web application that provides a structured 
 
 1. Clone the repository:
    ```
-   git clone https://github.com/yourusername/51talk-ai-learning.git
+   git clone https://github.com/Rehab-Alsaidi/51talk-ai-learning.git
    cd 51talk-ai-learning
    ```
 
@@ -142,17 +141,5 @@ If you encounter issues with file downloads in the admin panel:
 1. Verify your Gemini API key is correct in the `.env` file
 2. Check console logs for API-related errors
 3. Ensure internet connectivity for API calls
-
-## License
-
-This project is licensed under the MIT License - see the LICENSE file for details.
-
-## Acknowledgements
-
-- 51Talk for the inspiration and concept
-- Google's Gemini for the AI capabilities
-- The Flask team for the excellent web framework
-
----
 
 © 2025 51Talk AI Learning Platform. All rights reserved.
