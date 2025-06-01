@@ -1,0 +1,126 @@
+<!-- templates/admin/dashboard.html -->
+{% extends 'admin/base.html' %}
+
+{% block content %}
+<div class="container mt-4">
+    <h1>Admin Dashboard</h1>
+    
+    {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}
+            {% for category, message in messages %}
+                <div class="alert alert-{{ category }}">{{ message }}</div>
+            {% endfor %}
+        {% endif %}
+    {% endwith %}
+    
+    <div class="row mb-4">
+        <div class="col-md-3">
+            <div class="card">
+                <div class="card-body text-center">
+                    <h5 class="card-title">Users</h5>
+                    <h2>{{ stats.total_users }}</h2>
+                    <a href="{{ url_for('admin_users') }}" class="btn btn-sm btn-primary">Manage Users</a>
+                    <a href="{{ url_for('admin_export_users') }}" class="btn btn-sm btn-success">Export CSV</a>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-3">
+            <div class="card">
+                <div class="card-body text-center">
+                    <h5 class="card-title">Quizzes</h5>
+                    <h2>{{ stats.total_quizzes }}</h2>
+                    <a href="{{ url_for('admin_add_quiz') }}" class="btn btn-sm btn-primary">Add Quiz</a>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-3">
+            <div class="card">
+                <div class="card-body text-center">
+                    <h5 class="card-title">Materials</h5>
+                    <h2>{{ stats.total_materials }}</h2>
+                    <a href="{{ url_for('admin_add_material') }}" class="btn btn-sm btn-primary">Add Material</a>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-3">
+            <div class="card">
+                <div class="card-body text-center">
+                    <h5 class="card-title">Videos</h5>
+                    <h2>{{ stats.total_videos }}</h2>
+                    <a href="{{ url_for('admin_add_video') }}" class="btn btn-sm btn-primary">Add Video</a>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <div class="row mb-4">
+        <div class="col-md-3">
+            <div class="card">
+                <div class="card-body text-center">
+                    <h5 class="card-title">Projects</h5>
+                    <h2>{{ stats.total_projects }}</h2>
+                    <a href="{{ url_for('admin_add_project') }}" class="btn btn-sm btn-primary">Add Project</a>
+                </div>
+            </div>
+        </div>
+<div class="col-md-3">
+    <div class="card">
+        <div class="card-body text-center">
+            <h5 class="card-title">Submissions</h5>
+            <i class="fas fa-file-upload fa-2x mb-3 text-primary"></i>
+            <div>
+                <a href="{{ url_for('admin_submissions') }}" class="btn btn-sm btn-primary">View All</a>
+                <a href="{{ url_for('admin_download_submissions') }}" class="btn btn-sm btn-success">Download</a>
+            </div>
+        </div>
+    </div>
+</div>
+
+        <div class="col-md-3">
+            <div class="card">
+                <div class="card-body text-center">
+                    <h5 class="card-title">Today's Activity</h5>
+                    <p>Q&A: {{ stats.today_qa }}</p>
+                    <p>Quiz Attempts: {{ stats.today_quiz_attempts }}</p>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-3">
+            <div class="card">
+                <div class="card-body text-center">
+                    <h5 class="card-title">User Progress</h5>
+                    <a href="{{ url_for('admin_export_progress') }}" class="btn btn-success">Export CSV</a>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-3">
+            <div class="card">
+                <div class="card-body text-center">
+                    <h5 class="card-title">Feedback</h5>
+                    <a href="{{ url_for('admin_feedback') }}" class="btn btn-sm btn-primary">View Feedback</a>
+                    <a href="{{ url_for('admin_export_feedback') }}" class="btn btn-sm btn-success">Export CSV</a>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <div class="row mt-4">
+        <div class="col-md-6">
+            <div class="card">
+                <div class="card-body">
+                    <h5 class="card-title">Content Management</h5>
+                    <a href="{{ url_for('admin_manage_content') }}" class="btn btn-primary">Manage All Content</a>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-6">
+            <div class="card">
+                <div class="card-body text-danger">
+                    <h5 class="card-title">Database Management</h5>
+                    <a href="{{ url_for('admin_reset_db') }}" class="btn btn-danger">Reset Database</a>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

@@ -1,0 +1,55 @@
+{% extends 'admin/base.html' %}
+
+{% block title %}Manage Submissions{% endblock %}
+
+{% block content %}
+<div class="container mt-4">
+    <h2>Student Submissions</h2>
+    
+    <div class="mb-3">
+        <a href="{{ url_for('admin_download_submissions') }}" class="btn btn-primary">
+            <i class="fas fa-download"></i> Download All Submissions (ZIP)
+        </a>
+    </div>
+    
+    <div class="table-responsive">
+        <table class="table table-striped">
+            <thead class="thead-dark">
+                <tr>
+                    <th>ID</th>
+                    <th>Username</th>
+                    <th>Unit</th>
+                    <th>Filename</th>
+                    <th>Date</th>
+                    <th>Actions</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for submission in submissions %}
+                <tr>
+                    <td>{{ submission.id }}</td>
+                    <td>{{ submission.username }}</td>
+                    <td>{{ submission.unit_id }}</td>
+                    <td>{{ submission.file_path }}</td>
+                    <td>{{ submission.submitted_at }}</td>
+                    <td>
+                        <a href="{{ url_for('view_submission', submission_id=submission.id) }}" 
+                           class="btn btn-sm btn-success">
+                            <i class="fas fa-download"></i> Download
+                        </a>
+                        <a href="{{ url_for('debug_submission', submission_id=submission.id) }}" 
+                           class="btn btn-sm btn-info">
+                            <i class="fas fa-bug"></i> Debug
+                        </a>
+                    </td>
+                </tr>
+                {% else %}
+                <tr>
+                    <td colspan="6" class="text-center">No submissions found</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+{% endblock %}

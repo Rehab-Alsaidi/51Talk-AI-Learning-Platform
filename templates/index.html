@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+
+{% block title %}Welcome{% endblock %}
+
+{% block content %}
+<div class="card animated">
+    <div class="card-header">
+        <h1 class="card-title">Welcome to AI Learning Platform</h1>
+    </div>
+    <div class="card-body">
+        <p>Start your journey in artificial intelligence with our interactive learning modules.</p>
+        
+        <form method="POST" class="mt-4">
+            <div class="form-group">
+                <label for="username" class="form-label">Enter your name to begin:</label>
+                <input type="text" class="form-control" id="username" name="username" required placeholder="Your name">
+            </div>
+            <button type="submit" class="btn btn-primary">
+                <i class="fas fa-rocket"></i> Start Learning
+            </button>
+        </form>
+    </div>
+</div>
+
+<div class="card animated mt-4">
+    <div class="card-header">
+        <h2 class="card-title">Why Learn AI?</h2>
+    </div>
+    <div class="card-body">
+        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 1.5rem;">
+            <div class="feature-card">
+                <i class="fas fa-brain" style="font-size: 2rem; color: var(--accent-color); margin-bottom: 1rem;"></i>
+                <h3>Future Skills</h3>
+                <p>AI is transforming every industry. Gain skills for the jobs of tomorrow.</p>
+            </div>
+            <div class="feature-card">
+                <i class="fas fa-project-diagram" style="font-size: 2rem; color: var(--accent-color); margin-bottom: 1rem;"></i>
+                <h3>Hands-on Projects</h3>
+                <p>Learn by doing with practical, real-world projects.</p>
+            </div>
+            <div class="feature-card">
+                <i class="fas fa-chart-line" style="font-size: 2rem; color: var(--accent-color); margin-bottom: 1rem;"></i>
+                <h3>Career Growth</h3>
+                <p>Boost your career with in-demand AI knowledge.</p>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
