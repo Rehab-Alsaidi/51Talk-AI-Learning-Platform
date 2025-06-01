@@ -1,0 +1,100 @@
+{% extends "base.html" %}
+
+{% block title %}Unit {{ unit_id }}{% endblock %}
+
+{% block content %}
+<div class="welcome-section text-center">
+    <h1>Unit {{ unit_id }}</h1>
+    <p>Welcome to Unit {{ unit_id }} of your learning journey!</p>
+</div>
+
+<!-- Materials Section -->
+<h2 class="mb-3">Learning Materials</h2>
+<div class="list-group mb-4">
+    {% if materials %}
+        {% for material in materials %}
+            <div class="list-group-item">
+                <h5>{{ material[0] }}</h5>
+                <p>{{ material[1] }}</p>
+                {% if material[2] %}
+                    <a href="{{ material[2] }}" class="btn btn-primary" target="_blank">
+                        <i class="fas fa-download"></i> Download Material
+                    </a>
+                {% endif %}
+            </div>
+        {% endfor %}
+    {% else %}
+        <p>No materials available for this unit.</p>
+    {% endif %}
+</div>
+
+<!-- Videos Section -->
+<h2 class="mb-3">Video Lessons</h2>
+{% if videos %}
+    {% for video in videos %}
+        <div class="card mb-4">
+            <div class="card-header">
+                <h5>{{ video[0] }}</h5>
+            </div>
+            <div class="card-body">
+                <p>{{ video[2] }}</p>
+                <div class="video-container">
+                    <iframe width="560" height="315" src="https://www.youtube.com/embed/{{ video[1] }}" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowfullscreen></iframe>
+                </div>
+            </div>
+        </div>
+    {% endfor %}
+{% else %}
+    <p>No videos available for this unit.</p>
+{% endif %}
+
+<!-- Quiz Section -->
+<h2 class="mb-3">Quiz</h2>
+<div class="card mb-4">
+    <div class="card-body">
+        {% if quiz_attempted %}
+            <p>You have already attempted the quiz for this unit.</p>
+        {% else %}
+            <p>Test your knowledge with a quick quiz.</p>
+            <a href="{{ url_for('quiz', unit_id=unit_id) }}" class="btn btn-primary">Take Quiz</a>
+        {% endif %}
+    </div>
+</div>
+
+<!-- Project Section -->
+<h2 class="mb-3">Project Assignment</h2>
+{% if project %}
+    <div class="card mb-4">
+        <div class="card-header">
+            <h5>{{ project[0] }}</h5>
+        </div>
+        <div class="card-body">
+            <p>{{ project[1] }}</p>
+            <p><strong>Required Resources:</strong> {{ project[2] }}</p>
+            
+            {% if project_completed %}
+                <div class="alert alert-success">
+                    <i class="fas fa-check-circle"></i> You have completed this project.
+                </div>
+            {% else %}
+                <form method="POST" enctype="multipart/form-data">
+                    <div class="form-group">
+                        <label for="project_file">Upload your project submission:</label>
+                        <input type="file" class="form-control-file" id="project_file" name="project_file" required>
+                    </div>
+                    <button type="submit" name="submit_project" class="btn btn-primary">Submit Project</button>
+                </form>
+            {% endif %}
+        </div>
+    </div>
+{% else %}
+    <p>No project available for this unit.</p>
+{% endif %}
+
+<!-- Mark as Complete Button -->
+<form method="POST" class="text-center mb-5">
+    <button type="submit" name="complete" class="btn btn-success btn-lg">
+        <i class="fas fa-check-circle mr-2"></i> Mark Unit as Complete
+    </button>
+</form>
+{% endblock %}
