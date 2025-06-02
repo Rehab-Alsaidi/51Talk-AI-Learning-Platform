@@ -130,33 +130,37 @@
                                 <i class="fas fa-book mr-2"></i> Add Material
                             </a>
                         </li>
-                        <li class="nav-item">
-                            <a class="nav-link" href="{{ url_for('admin_add_video') }}">
-                                <i class="fas fa-video mr-2"></i> Add Video
-                            </a>
-                        </li>
-                        <li class="nav-item">
-                            <a class="nav-link" href="{{ url_for('admin_add_project') }}">
-                                <i class="fas fa-project-diagram mr-2"></i> Add Project
-                            </a>
-                        </li>
-                        <li class="nav-header mt-3 text-muted pl-3">Data Management</li>
-                        <li class="nav-item">
-                            <a class="nav-link" href="{{ url_for('admin_export_users') }}">
-                                <i class="fas fa-file-export mr-2"></i> Export Users
-                            </a>
-                        </li>
-                        <li class="nav-item">
-                            <a class="nav-link" href="{{ url_for('admin_export_progress') }}">
-                                <i class="fas fa-file-export mr-2"></i> Export Progress
-                            </a>
-                        </li>
+    <li class="nav-item">
+        <a class="nav-link" href="{{ url_for('admin_add_word') }}">
+            <i class="fas fa-language mr-2"></i> Add AI Word
+        </a>
+    </li>
+    <li class="nav-item">
+        <a class="nav-link" href="{{ url_for('admin_add_video') }}">
+            <i class="fas fa-video mr-2"></i> Add Video
+        </a>
+    </li>
+    <li class="nav-item">
+        <a class="nav-link" href="{{ url_for('admin_add_project') }}">
+            <i class="fas fa-project-diagram mr-2"></i> Add Project
+        </a>
+    </li>
+    <li class="nav-header mt-3 text-muted pl-3">Data Management</li>
+    <li class="nav-item">
+        <a class="nav-link" href="{{ url_for('admin_export_users') }}">
+            <i class="fas fa-file-export mr-2"></i> Export Users
+        </a>
+    </li>
+    <li class="nav-item">
+        <a class="nav-link" href="{{ url_for('admin_export_progress') }}">
+            <i class="fas fa-file-export mr-2"></i> Export Progress
+        </a>
+    </li>
     <li class="nav-item">
         <a class="nav-link text-danger" href="{{ url_for('admin_reset_db') }}">
             <i class="fas fa-trash mr-2"></i> Reset Database
         </a>
     </li>
-  
     <li class="nav-item">
         <a class="nav-link" href="{{ url_for('admin_submissions') }}">
             <i class="fas fa-file-upload mr-2"></i> User Submissions

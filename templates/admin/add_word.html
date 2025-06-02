@@ -1,0 +1,51 @@
+{% extends 'admin/base.html' %}
+
+{% block content %}
+<div class="container mt-4">
+    <h1>Add AI Vocabulary Word</h1>
+    
+    {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}
+            {% for category, message in messages %}
+                <div class="alert alert-{{ category }}">{{ message }}</div>
+            {% endfor %}
+        {% endif %}
+    {% endwith %}
+    
+    <div class="card">
+        <div class="card-body">
+            <form method="POST">
+                <div class="form-group">
+                    <label for="unit_id">Unit ID:</label>
+                    <input type="number" class="form-control" id="unit_id" name="unit_id" required min="1">
+                    <small class="form-text text-muted">Which unit this word belongs to</small>
+                </div>
+                
+                <div class="form-group">
+                    <label for="section">Section (1-5):</label>
+                    <input type="number" class="form-control" id="section" name="section" min="1" max="5" value="1" required>
+                    <small class="form-text text-muted">Which section this word belongs to (1-5)</small>
+                </div>
+                
+                <div class="form-group">
+                    <label for="word">AI Word:</label>
+                    <input type="text" class="form-control" id="word" name="word" required>
+                </div>
+                
+                <div class="form-group">
+                    <label for="definition">Definition:</label>
+                    <textarea class="form-control" id="definition" name="definition" rows="3" required></textarea>
+                </div>
+                
+                <div class="form-group">
+                    <label for="example">Example Usage (optional):</label>
+                    <textarea class="form-control" id="example" name="example" rows="2"></textarea>
+                </div>
+                
+                <button type="submit" class="btn btn-primary">Add Word</button>
+                <a href="{{ url_for('admin_dashboard') }}" class="btn btn-secondary">Cancel</a>
+            </form>
+        </div>
+    </div>
+</div>
+{% endblock %}

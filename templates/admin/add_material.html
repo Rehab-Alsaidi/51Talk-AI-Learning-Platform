@@ -1,17 +1,12 @@
-<!-- templates/admin/add_material.html -->
 {% extends 'admin/base.html' %}
 
 {% block content %}
 <div class="container mt-4">
     <h1>Add Learning Material</h1>
     
-    {% with messages = get_flashed_messages(with_categories=true) %}
-        {% if messages %}
-            {% for category, message in messages %}
-                <div class="alert alert-{{ category }}">{{ message }}</div>
-            {% endfor %}
-        {% endif %}
-    {% endwith %}
+    <div class="alert alert-info">
+        <strong>Simplified Upload:</strong> Just select a unit and upload your file. The title will be automatically generated from the filename.
+    </div>
     
     <div class="card">
         <div class="card-body">
@@ -19,28 +14,21 @@
                 <div class="form-group">
                     <label for="unit_id">Unit ID:</label>
                     <input type="number" class="form-control" id="unit_id" name="unit_id" required min="1">
-                    <small class="form-text text-muted">Which unit this material belongs to</small>
                 </div>
                 
                 <div class="form-group">
-                    <label for="title">Title:</label>
-                    <input type="text" class="form-control" id="title" name="title" required>
+                    <label for="file">File Upload (required):</label>
+                    <input type="file" class="form-control-file" id="file" name="file" required>
+                    <small class="text-muted">Allowed file types: PDF, PPT, PPTX, DOC, DOCX, PNG, JPG, JPEG, GIF</small>
                 </div>
                 
                 <div class="form-group">
-                    <label for="content">Content:</label>
-                    <textarea class="form-control" id="content" name="content" rows="5" required></textarea>
-                    <small class="form-text text-muted">This content will be displayed on the unit page</small>
+                    <label for="content">Additional Notes (optional):</label>
+                    <textarea class="form-control" id="content" name="content" rows="3" placeholder="Optional: Add any notes or description for this material"></textarea>
                 </div>
                 
-                <div class="form-group">
-                    <label for="file">Upload File (optional):</label>
-                    <input type="file" class="form-control-file" id="file" name="file">
-                    <small class="form-text text-muted">Supported files: PDF, Word, PowerPoint, Images</small>
-                </div>
-                
-                <button type="submit" class="btn btn-primary">Add Material</button>
-                <a href="{{ url_for('admin_dashboard') }}" class="btn btn-secondary">Cancel</a>
+                <button type="submit" class="btn btn-primary">Upload Material</button>
+                <a href="{{ url_for('admin_manage_content') }}" class="btn btn-secondary">Cancel</a>
             </form>
         </div>
     </div>
