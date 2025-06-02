@@ -2344,6 +2344,5 @@ if __name__ == '__main__':
         print("Database initialized with sample data.")
     else:
         print("Using existing database.")
-        # Check and create words table if it doesn't exist
         check_and_create_words_table()
-    app.run(debug=True)
+    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)), debug=True)
