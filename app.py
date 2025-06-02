@@ -2345,4 +2345,4 @@ if __name__ == '__main__':
     else:
         print("Using existing database.")
         check_and_create_words_table()
-    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)), debug=True)
+    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 8080)), debug=True)
