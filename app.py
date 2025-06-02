@@ -272,6 +272,27 @@ def get_table_columns(table_name):
         columns = cursor.fetchall()
         return [col[1] for col in columns]
 
+def check_and_create_words_table():
+    """Ensure words table exists with proper columns"""
+    with sqlite3.connect(DB_NAME) as conn:
+        cursor = conn.cursor()
+        
+        # Check if words table exists
+        tables = get_tables()
+        if 'words' not in tables:
+            # Create new words table
+            cursor.execute('''CREATE TABLE words (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            unit_id INTEGER,
+                            word TEXT,
+                            definition TEXT,
+                            example TEXT,
+                            section INTEGER DEFAULT 1)''')
+            conn.commit()
+            print("Created words table")
+            return True
+        return True
+
 def reset_database():
     """Delete all data from the database but keep the tables"""
     with sqlite3.connect(DB_NAME) as conn:
@@ -285,6 +306,10 @@ def reset_database():
             cursor.execute("DELETE FROM projects")
             cursor.execute("DELETE FROM materials")
             cursor.execute("DELETE FROM videos")
+            
+            # Check if words table exists before trying to delete
+            if 'words' in get_tables():
+                cursor.execute("DELETE FROM words")  # Added for words table
             
             # Delete all progress
             cursor.execute("DELETE FROM progress")
@@ -584,6 +609,15 @@ def init_db(reset=False):
                             youtube_url TEXT,
                             description TEXT)''')
         
+        # Add words table with section column
+        cursor.execute('''CREATE TABLE IF NOT EXISTS words (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            unit_id INTEGER,
+                            word TEXT,
+                            definition TEXT,
+                            example TEXT,
+                            section INTEGER DEFAULT 1)''')
+        
         # Activity tracking
         cursor.execute('''CREATE TABLE IF NOT EXISTS qa_history (
                             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -627,6 +661,7 @@ def init_db(reset=False):
     # After creating tables, check and fix any issues
     check_and_fix_admin_table()
     check_and_fix_feedback_table()
+    check_and_create_words_table()
 
 # Add sample data
 def add_sample_data():
@@ -705,6 +740,23 @@ def home():
                 flash(f'Error connecting to user: {str(e)}', 'error')
     
     return render_template('index.html')
+@app.route('/download_material/<path:filename>')
+def download_material(filename):
+    if not session.get('authenticated'):
+        return redirect(url_for('password_gate'))
+    
+    if 'username' not in session:
+        return redirect(url_for('home'))
+    
+    try:
+        # Security check to prevent directory traversal
+        safe_filename = filename.replace('../', '').replace('..\\', '')
+        file_path = os.path.join(UPLOAD_FOLDER, safe_filename)
+        
+        return send_file(file_path, as_attachment=True)
+    except Exception as e:
+        flash(f"Error downloading file: {str(e)}", "error")
+        return redirect(request.referrer or url_for('dashboard'))
 
 @app.route('/dashboard')
 def dashboard():
@@ -892,18 +944,36 @@ def unit(unit_id):
         cursor.execute("SELECT title, youtube_url, description FROM videos WHERE unit_id=?", (unit_id,))
         videos = cursor.fetchall()
         
+        # Get vocabulary words for this unit
+        cursor.execute("""
+            SELECT id, word, definition, example, section 
+            FROM words 
+            WHERE unit_id=? 
+            ORDER BY section, id
+        """, (unit_id,))
+        words = cursor.fetchall()
+        
         progress = get_progress(user_id, unit_id)
         project_completed = progress[2] if progress else 0
         quiz_attempted = has_attempted_quiz(user_id, unit_id)
         
+        # Get the quiz_id for this unit (added to fix the URL building error)
+        quiz_id = None
+        cursor.execute("SELECT id FROM quizzes WHERE unit_id=? LIMIT 1", (unit_id,))
+        quiz_result = cursor.fetchone()
+        if quiz_result:
+            quiz_id = quiz_result[0]
+    
     return render_template('unit.html',
                          username=username,
                          unit_id=unit_id,
                          project=project,
                          materials=materials,
                          videos=videos,
+                         words=words,
                          project_completed=project_completed,
-                         quiz_attempted=quiz_attempted)
+                         quiz_attempted=quiz_attempted,
+                         quiz_id=quiz_id)  # Add quiz_id to template context
 
 @app.route('/quiz/<int:unit_id>', methods=['GET', 'POST'])
 def quiz(unit_id):
@@ -1352,6 +1422,34 @@ def admin_feedback():
     
     return render_template('admin/feedback.html', feedback=feedback_items)
 
+# Add the admin_add_word route with section support
+@app.route('/admin/add_word', methods=['GET', 'POST'])
+@admin_required
+def admin_add_word():
+    # Ensure words table exists
+    check_and_create_words_table()
+    
+    if request.method == 'POST':
+        try:
+            unit_id = request.form['unit_id']
+            word = request.form['word']
+            definition = request.form['definition']
+            example = request.form.get('example', '')  # This field is optional
+            section = request.form.get('section', 1)   # Default to section 1 if not provided
+            
+            with sqlite3.connect(DB_NAME) as conn:
+                conn.execute("""
+                    INSERT INTO words (unit_id, word, definition, example, section)
+                    VALUES (?, ?, ?, ?, ?)
+                """, (unit_id, word, definition, example, section))
+                conn.commit()
+                flash('AI vocabulary word added successfully', 'success')
+                return redirect(url_for('admin_add_word'))
+        except Exception as e:
+            flash(f'Error adding word: {str(e)}', 'danger')
+    
+    return render_template('admin/add_word.html')
+
 @app.route('/admin/add_quiz', methods=['GET', 'POST'])
 @admin_required
 def admin_add_quiz():
@@ -1382,31 +1480,108 @@ def admin_add_quiz():
 def admin_add_material():
     if request.method == 'POST':
         try:
-            title = request.form['title']
-            content = request.form['content']
             unit_id = request.form['unit_id']
             file = request.files.get('file')
             
-            file_path = None
-            if file and allowed_file(file.filename):
-                filename = secure_filename(f"unit_{unit_id}_{file.filename}")
-                # Save the file
-                file.save(os.path.join(UPLOAD_FOLDER, filename))
-                # Store only the filename, not the full path
-                file_path = filename
-            
-            with sqlite3.connect(DB_NAME) as conn:
-                conn.execute("""
-                    INSERT INTO materials (unit_id, title, content, file_path)
-                    VALUES (?, ?, ?, ?)
-                """, (unit_id, title, content, file_path))
-                conn.commit()
-                flash('Material added successfully', 'success')
+            # Check if file was provided
+            if not file or file.filename == '':
+                flash('Please select a file to upload', 'danger')
                 return redirect(url_for('admin_add_material'))
+                
+            if allowed_file(file.filename):
+                # Generate a secure filename
+                original_filename = secure_filename(file.filename)
+                filename = f"unit_{unit_id}_{original_filename}"
+                
+                # Save the file
+                file_path = os.path.join(UPLOAD_FOLDER, filename)
+                file.save(file_path)
+                
+                # Auto-generate title from filename (remove extension)
+                title = os.path.splitext(original_filename)[0].replace('_', ' ').replace('-', ' ').title()
+                
+                # Get any content if provided (now optional)
+                content = request.form.get('content', '')
+                
+                with sqlite3.connect(DB_NAME) as conn:
+                    conn.execute("""
+                        INSERT INTO materials (unit_id, title, content, file_path)
+                        VALUES (?, ?, ?, ?)
+                    """, (unit_id, title, content, filename))
+                    conn.commit()
+                    flash('Material added successfully', 'success')
+                    return redirect(url_for('admin_manage_content'))
+            else:
+                flash(f'Invalid file type. Allowed types: {", ".join(ALLOWED_EXTENSIONS)}', 'danger')
         except Exception as e:
             flash(f'Error adding material: {str(e)}', 'danger')
     
     return render_template('admin/add_material.html')
+
+@app.route('/admin/edit_material/<int:material_id>', methods=['GET', 'POST'])
+@admin_required
+def admin_edit_material(material_id):
+    with sqlite3.connect(DB_NAME) as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM materials WHERE id=?", (material_id,))
+        material = cursor.fetchone()
+        
+        if not material:
+            flash('Material not found', 'danger')
+            return redirect(url_for('admin_manage_content'))
+        
+        # Convert to dict for easier access
+        material = {
+            'id': material[0],
+            'unit_id': material[1],
+            'title': material[2],
+            'content': material[3],
+            'file_path': material[4]
+        }
+    
+    if request.method == 'POST':
+        try:
+            unit_id = request.form['unit_id']
+            title = request.form['title']
+            content = request.form.get('content', '')  # Now optional
+            
+            # Check if a new file was uploaded
+            file = request.files.get('file')
+            file_path = material['file_path']  # Default to existing file
+            
+            if file and file.filename:
+                # A new file was uploaded
+                if allowed_file(file.filename):
+                    # Delete the old file if it exists
+                    if material['file_path']:
+                        old_file_path = os.path.join(UPLOAD_FOLDER, material['file_path'])
+                        try:
+                            os.remove(old_file_path)
+                        except:
+                            pass  # File might not exist, that's okay
+                    
+                    # Save the new file
+                    original_filename = secure_filename(file.filename)
+                    file_path = f"unit_{unit_id}_{original_filename}"
+                    file.save(os.path.join(UPLOAD_FOLDER, file_path))
+                else:
+                    flash(f'Invalid file type. Allowed types: {", ".join(ALLOWED_EXTENSIONS)}', 'danger')
+                    return redirect(url_for('admin_edit_material', material_id=material_id))
+            
+            with sqlite3.connect(DB_NAME) as conn:
+                conn.execute("""
+                    UPDATE materials
+                    SET unit_id=?, title=?, content=?, file_path=?
+                    WHERE id=?
+                """, (unit_id, title, content, file_path, material_id))
+                conn.commit()
+                flash('Material updated successfully', 'success')
+                return redirect(url_for('admin_manage_content'))
+                
+        except Exception as e:
+            flash(f'Error updating material: {str(e)}', 'danger')
+    
+    return render_template('admin/edit_material.html', material=material)
 
 @app.route('/admin/add_video', methods=['GET', 'POST'])
 @admin_required
@@ -1470,6 +1645,9 @@ def admin_add_project():
 @app.route('/admin/manage_content')
 @admin_required
 def admin_manage_content():
+    # Ensure words table exists
+    check_and_create_words_table()
+    
     with sqlite3.connect(DB_NAME) as conn:
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
@@ -1489,12 +1667,17 @@ def admin_manage_content():
         # Get all projects
         cursor.execute("SELECT id, unit_id, title FROM projects ORDER BY unit_id, id")
         projects = cursor.fetchall()
+        
+        # Get all AI vocabulary words with section
+        cursor.execute("SELECT id, unit_id, word, section FROM words ORDER BY unit_id, section, id")
+        words = cursor.fetchall()
     
     return render_template('admin/manage_content.html', 
                           quizzes=quizzes,
                           materials=materials,
                           videos=videos,
-                          projects=projects)
+                          projects=projects,
+                          words=words)
 
 @app.route('/admin/export_users', methods=['GET'])
 @admin_required
@@ -1622,13 +1805,309 @@ def admin_logout():
     flash('You have been logged out from admin panel', 'info')
     return redirect(url_for('admin_login'))
 
-@app.errorhandler(404)
-def page_not_found(e):
-    return render_template('error.html', message="Page not found"), 404
+# ---------- ADMIN CONTENT MANAGEMENT ROUTES ----------
 
-@app.errorhandler(500)
-def internal_server_error(e):
-    return render_template('error.html', message="Internal server error"), 500
+# Quiz management
+@app.route('/admin/view_quiz/<int:quiz_id>')
+@admin_required
+def admin_view_quiz(quiz_id):
+    with sqlite3.connect(DB_NAME) as conn:
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM quizzes WHERE id=?", (quiz_id,))
+        quiz = cursor.fetchone()
+        if not quiz:
+            flash('Quiz not found', 'danger')
+            return redirect(url_for('admin_manage_content'))
+        
+        # Parse options from JSON
+        try:
+            options = json.loads(quiz['options'])
+        except:
+            options = []
+            
+        return render_template('admin/view_quiz.html', quiz=quiz, options=options)
+
+@app.route('/admin/edit_quiz/<int:quiz_id>', methods=['GET', 'POST'])
+@admin_required
+def admin_edit_quiz(quiz_id):
+    if request.method == 'POST':
+        try:
+            data = request.form
+            unit_id = data['unit_id']
+            question = data['question']
+            options = [data[f'option{i}'] for i in range(1, 4)]
+            correct_answer = int(data['correct_answer'])
+            explanation = data['explanation']
+            
+            with sqlite3.connect(DB_NAME) as conn:
+                conn.execute("""
+                    UPDATE quizzes 
+                    SET unit_id=?, question=?, options=?, correct_answer=?, explanation=?
+                    WHERE id=?
+                """, (unit_id, question, json.dumps(options), correct_answer, explanation, quiz_id))
+                conn.commit()
+                flash('Quiz updated successfully', 'success')
+                return redirect(url_for('admin_manage_content'))
+        except Exception as e:
+            flash(f'Error updating quiz: {str(e)}', 'danger')
+            
+    with sqlite3.connect(DB_NAME) as conn:
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM quizzes WHERE id=?", (quiz_id,))
+        quiz = cursor.fetchone()
+        if not quiz:
+            flash('Quiz not found', 'danger')
+            return redirect(url_for('admin_manage_content'))
+        
+        # Parse options from JSON
+        try:
+            options = json.loads(quiz['options'])
+        except:
+            options = []
+            
+        return render_template('admin/edit_quiz.html', quiz=quiz, options=options)
+
+@app.route('/admin/delete_quiz/<int:quiz_id>')
+@admin_required
+def admin_delete_quiz(quiz_id):
+    try:
+        with sqlite3.connect(DB_NAME) as conn:
+            conn.execute("DELETE FROM quizzes WHERE id=?", (quiz_id,))
+            conn.commit()
+            flash('Quiz deleted successfully', 'success')
+    except Exception as e:
+        flash(f'Error deleting quiz: {str(e)}', 'danger')
+    return redirect(url_for('admin_manage_content'))
+
+# Material management
+@app.route('/admin/view_material/<int:material_id>')
+@admin_required
+def admin_view_material(material_id):
+    with sqlite3.connect(DB_NAME) as conn:
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM materials WHERE id=?", (material_id,))
+        material = cursor.fetchone()
+        if not material:
+            flash('Material not found', 'danger')
+            return redirect(url_for('admin_manage_content'))
+        return render_template('admin/view_material.html', material=material)
+
+@app.route('/admin/delete_material/<int:material_id>')
+@admin_required
+def admin_delete_material(material_id):
+    try:
+        with sqlite3.connect(DB_NAME) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            cursor.execute("SELECT file_path FROM materials WHERE id=?", (material_id,))
+            material = cursor.fetchone()
+            
+            # Delete the file if it exists
+            if material and material['file_path']:
+                file_path = os.path.join(UPLOAD_FOLDER, material['file_path'])
+                if os.path.exists(file_path):
+                    try:
+                        os.remove(file_path)
+                    except:
+                        pass
+            
+            conn.execute("DELETE FROM materials WHERE id=?", (material_id,))
+            conn.commit()
+            flash('Material deleted successfully', 'success')
+    except Exception as e:
+        flash(f'Error deleting material: {str(e)}', 'danger')
+    return redirect(url_for('admin_manage_content'))
+
+# Video management
+@app.route('/admin/view_video/<int:video_id>')
+@admin_required
+def admin_view_video(video_id):
+    with sqlite3.connect(DB_NAME) as conn:
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM videos WHERE id=?", (video_id,))
+        video = cursor.fetchone()
+        if not video:
+            flash('Video not found', 'danger')
+            return redirect(url_for('admin_manage_content'))
+        return render_template('admin/view_video.html', video=video)
+
+@app.route('/admin/edit_video/<int:video_id>', methods=['GET', 'POST'])
+@admin_required
+def admin_edit_video(video_id):
+    if request.method == 'POST':
+        try:
+            title = request.form['title']
+            youtube_url = request.form['youtube_url']
+            description = request.form['description']
+            unit_id = request.form['unit_id']
+            
+            # Extract YouTube video ID if full URL is provided
+            if 'youtube.com' in youtube_url or 'youtu.be' in youtube_url:
+                if 'v=' in youtube_url:
+                    # Format: https://www.youtube.com/watch?v=VIDEO_ID
+                    youtube_id = youtube_url.split('v=')[1].split('&')[0]
+                elif 'youtu.be/' in youtube_url:
+                    # Format: https://youtu.be/VIDEO_ID
+                    youtube_id = youtube_url.split('youtu.be/')[1].split('?')[0]
+                else:
+                    youtube_id = youtube_url
+            else:
+                youtube_id = youtube_url  # Assume ID was provided directly
+            
+            with sqlite3.connect(DB_NAME) as conn:
+                conn.execute("""
+                    UPDATE videos 
+                    SET unit_id=?, title=?, youtube_url=?, description=?
+                    WHERE id=?
+                """, (unit_id, title, youtube_id, description, video_id))
+                conn.commit()
+                flash('Video updated successfully', 'success')
+                return redirect(url_for('admin_manage_content'))
+        except Exception as e:
+            flash(f'Error updating video: {str(e)}', 'danger')
+            
+    with sqlite3.connect(DB_NAME) as conn:
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM videos WHERE id=?", (video_id,))
+        video = cursor.fetchone()
+        if not video:
+            flash('Video not found', 'danger')
+            return redirect(url_for('admin_manage_content'))
+        return render_template('admin/edit_video.html', video=video)
+
+@app.route('/admin/delete_video/<int:video_id>')
+@admin_required
+def admin_delete_video(video_id):
+    try:
+        with sqlite3.connect(DB_NAME) as conn:
+            conn.execute("DELETE FROM videos WHERE id=?", (video_id,))
+            conn.commit()
+            flash('Video deleted successfully', 'success')
+    except Exception as e:
+        flash(f'Error deleting video: {str(e)}', 'danger')
+    return redirect(url_for('admin_manage_content'))
+
+# Project management
+@app.route('/admin/view_project/<int:project_id>')
+@admin_required
+def admin_view_project(project_id):
+    with sqlite3.connect(DB_NAME) as conn:
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM projects WHERE id=?", (project_id,))
+        project = cursor.fetchone()
+        if not project:
+            flash('Project not found', 'danger')
+            return redirect(url_for('admin_manage_content'))
+        return render_template('admin/view_project.html', project=project)
+
+@app.route('/admin/edit_project/<int:project_id>', methods=['GET', 'POST'])
+@admin_required
+def admin_edit_project(project_id):
+    if request.method == 'POST':
+        try:
+            title = request.form['title']
+            description = request.form['description']
+            resources = request.form['resources']
+            unit_id = request.form['unit_id']
+            
+            with sqlite3.connect(DB_NAME) as conn:
+                conn.execute("""
+                    UPDATE projects 
+                    SET unit_id=?, title=?, description=?, resources=?
+                    WHERE id=?
+                """, (unit_id, title, description, resources, project_id))
+                conn.commit()
+                flash('Project updated successfully', 'success')
+                return redirect(url_for('admin_manage_content'))
+        except Exception as e:
+            flash(f'Error updating project: {str(e)}', 'danger')
+            
+    with sqlite3.connect(DB_NAME) as conn:
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM projects WHERE id=?", (project_id,))
+        project = cursor.fetchone()
+        if not project:
+            flash('Project not found', 'danger')
+            return redirect(url_for('admin_manage_content'))
+        return render_template('admin/edit_project.html', project=project)
+
+@app.route('/admin/delete_project/<int:project_id>')
+@admin_required
+def admin_delete_project(project_id):
+    try:
+        with sqlite3.connect(DB_NAME) as conn:
+            conn.execute("DELETE FROM projects WHERE id=?", (project_id,))
+            conn.commit()
+            flash('Project deleted successfully', 'success')
+    except Exception as e:
+        flash(f'Error deleting project: {str(e)}', 'danger')
+    return redirect(url_for('admin_manage_content'))
+
+# Word management
+@app.route('/admin/view_word/<int:word_id>')
+@admin_required
+def admin_view_word(word_id):
+    with sqlite3.connect(DB_NAME) as conn:
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM words WHERE id=?", (word_id,))
+        word = cursor.fetchone()
+        if not word:
+            flash('Word not found', 'danger')
+            return redirect(url_for('admin_manage_content'))
+        return render_template('admin/view_word.html', word=word)
+
+@app.route('/admin/edit_word/<int:word_id>', methods=['GET', 'POST'])
+@admin_required
+def admin_edit_word(word_id):
+    if request.method == 'POST':
+        try:
+            unit_id = request.form['unit_id']
+            word = request.form['word']
+            definition = request.form['definition']
+            example = request.form.get('example', '')
+            section = request.form.get('section', 1)
+            
+            with sqlite3.connect(DB_NAME) as conn:
+                conn.execute("""
+                    UPDATE words 
+                    SET unit_id=?, word=?, definition=?, example=?, section=?
+                    WHERE id=?
+                """, (unit_id, word, definition, example, section, word_id))
+                conn.commit()
+                flash('Word updated successfully', 'success')
+                return redirect(url_for('admin_manage_content'))
+        except Exception as e:
+            flash(f'Error updating word: {str(e)}', 'danger')
+            
+    with sqlite3.connect(DB_NAME) as conn:
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM words WHERE id=?", (word_id,))
+        word = cursor.fetchone()
+        if not word:
+            flash('Word not found', 'danger')
+            return redirect(url_for('admin_manage_content'))
+        return render_template('admin/edit_word.html', word=word)
+
+@app.route('/admin/delete_word/<int:word_id>')
+@admin_required
+def admin_delete_word(word_id):
+    try:
+        with sqlite3.connect(DB_NAME) as conn:
+            conn.execute("DELETE FROM words WHERE id=?", (word_id,))
+            conn.commit()
+            flash('Word deleted successfully', 'success')
+    except Exception as e:
+        flash(f'Error deleting word: {str(e)}', 'danger')
+    return redirect(url_for('admin_manage_content'))
 
 @app.route('/admin/fix_file_paths')
 @admin_required
@@ -1713,6 +2192,7 @@ def view_submission(submission_id):
         print(f"Download error: {str(e)}")
         flash(f"Error downloading file: {str(e)}", "error")
         return redirect(url_for('admin_submissions'))
+
 @app.route('/admin/debug_submission/<int:submission_id>')
 @admin_required
 def debug_submission(submission_id):
@@ -1847,6 +2327,14 @@ def stream_file(filename):
         print(f"Stream error: {str(e)}")
         return f"Error: {str(e)}", 500
 
+@app.errorhandler(404)
+def page_not_found(e):
+    return render_template('error.html', message="Page not found"), 404
+
+@app.errorhandler(500)
+def internal_server_error(e):
+    return render_template('error.html', message="Internal server error"), 500
+
 if __name__ == '__main__':
     # Only initialize the database if needed, don't reset it automatically
     if not os.path.exists(DB_NAME):
@@ -1856,4 +2344,6 @@ if __name__ == '__main__':
         print("Database initialized with sample data.")
     else:
         print("Using existing database.")
+        # Check and create words table if it doesn't exist
+        check_and_create_words_table()
     app.run(debug=True)

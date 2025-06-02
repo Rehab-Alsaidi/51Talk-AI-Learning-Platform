@@ -1,0 +1,43 @@
+{% extends 'admin/base.html' %}
+
+{% block content %}
+<div class="container mt-4">
+    <h1>Edit AI Vocabulary Word</h1>
+    
+    <div class="card">
+        <div class="card-body">
+            <form method="POST">
+                <div class="form-group">
+                    <label for="unit_id">Unit ID:</label>
+                    <input type="number" class="form-control" id="unit_id" name="unit_id" value="{{ word.unit_id }}" required min="1">
+                </div>
+                
+                <div class="form-group">
+                    <label for="section">Section:</label>
+                    <input type="number" class="form-control" id="section" name="section" value="{{ word.section }}" required min="1">
+                    <small class="text-muted">Words can be grouped into sections within a unit</small>
+                </div>
+                
+                <div class="form-group">
+                    <label for="word">Word:</label>
+                    <input type="text" class="form-control" id="word" name="word" value="{{ word.word }}" required>
+                </div>
+                
+                <div class="form-group">
+                    <label for="definition">Definition:</label>
+                    <textarea class="form-control" id="definition" name="definition" rows="3" required>{{ word.definition }}</textarea>
+                </div>
+                
+                <div class="form-group">
+                    <label for="example">Example Usage:</label>
+                    <textarea class="form-control" id="example" name="example" rows="2">{{ word.example }}</textarea>
+                    <small class="text-muted">Optional: An example sentence using this word</small>
+                </div>
+                
+                <button type="submit" class="btn btn-primary">Update Word</button>
+                <a href="{{ url_for('admin_manage_content') }}" class="btn btn-secondary">Cancel</a>
+            </form>
+        </div>
+    </div>
+</div>
+{% endblock %}
