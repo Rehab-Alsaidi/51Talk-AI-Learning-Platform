@@ -1,34 +1,83 @@
-from flask import Flask, render_template, request, redirect, url_for, session, flash, jsonify, send_file
-import sqlite3
+"""
+51Talk AI Learning Platform
+
+A Flask web application providing AI-assisted learning experiences with multilingual support.
+This application includes authentication, content management, quiz functionality, and admin features.
+"""
+
+from __future__ import annotations
+import csv
+import io
+import json
+import threading
+import atexit
+import logging
+import os
+import random
+import re
+import json
 import os
 import secrets
-import csv
-import random  # Added for motivational messages
-from datetime import datetime
-from werkzeug.utils import secure_filename
-from werkzeug.security import generate_password_hash, check_password_hash
-from langchain_google_genai import ChatGoogleGenerativeAI
-from dotenv import load_dotenv
-import json
-from functools import wraps
+import string
 import tempfile
 import zipfile
-import io
+from datetime import datetime
+from functools import wraps
+from typing import Any, Dict, List, Optional, Tuple, Union, Callable
+from enhanced_document_qa import DocumentQA, VectorStore, initialize_document_qa, get_document_qa
+from qa import SimpleQA, get_qa_system, ask_question, get_system_status
+import psycopg2
+from flask import (Flask, flash, jsonify, redirect, render_template, request,
+                   send_file, session, url_for,request, session, redirect, url_for, flash, render_template)
+from flask_mail import Mail, Message
+from psycopg2 import pool
+from psycopg2.extras import RealDictCursor
+from werkzeug.security import check_password_hash, generate_password_hash
+from werkzeug.utils import secure_filename
+from dotenv import load_dotenv
+
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
 # Load environment variables
 load_dotenv()
+
+# Initialize Flask app
 app = Flask(__name__)
 app.secret_key = os.getenv("FLASK_SECRET_KEY", secrets.token_hex(16))
 
 # Configuration
-DB_NAME = 'database.db'
 UPLOAD_FOLDER = 'static/uploads'
+DOCUMENTS_DIR = os.path.join(os.getcwd(), 'documents')
+VECTOR_DB_PATH = os.path.join(os.getcwd(), 'vector_db')
 ALLOWED_EXTENSIONS = {'pdf', 'png', 'jpg', 'jpeg', 'gif', 'ppt', 'pptx', 'doc', 'docx'}
-ACCESS_PASSWORD = "5151"  # Change this in production
+ACCESS_PASSWORD = os.getenv("ACCESS_PASSWORD", "5151") 
+LLAMA_MODEL_PATH = os.path.abspath("models/Meta-Llama-3-8B-Instruct-Q4_K_M.gguf")
+
+# Create necessary directories
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+os.makedirs(DOCUMENTS_DIR, exist_ok=True)
+
+# Email validation regex
+EMAIL_REGEX = re.compile(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$')
+
+# Configure Flask-Mail
+app.config['MAIL_SERVER'] = os.getenv('MAIL_SERVER', 'smtp.gmail.com')
+app.config['MAIL_PORT'] = int(os.getenv('MAIL_PORT', 587))
+app.config['MAIL_USE_TLS'] = os.getenv('MAIL_USE_TLS', 'True').lower() in ('true', '1', 't')
+app.config['MAIL_USERNAME'] = os.getenv('MAIL_USERNAME')
+app.config['MAIL_PASSWORD'] = os.getenv('MAIL_PASSWORD')
+app.config['MAIL_DEFAULT_SENDER'] = os.getenv('MAIL_DEFAULT_SENDER')
+
+# Create mail instance
+mail = Mail(app)
+
+# Global database connection pool
+db_connection_pool: Optional[pool.SimpleConnectionPool] = None
 
 # Supported languages
-LANGUAGES = {
+LANGUAGES: Dict[str, str] = {
     'en': 'English',
     'zh': '中文',
     'ar': 'العربية'
@@ -37,7 +86,7 @@ LANGUAGES = {
 # Translation dictionaries
 TRANSLATIONS = {
     'en': {
-        'welcome': 'Welcome to the 51Talk AI Learning Platform',
+        'welcome': '51Talk AI Hub',
         'login': 'Login',
         'register': 'Register',
         'username': 'Username',
@@ -66,7 +115,6 @@ TRANSLATIONS = {
         'account': 'Account',
         'language': 'Language',
         'save': 'Save',
-        # New keys for enhanced translation
         'learn_unit_desc': 'Learn essential concepts and practice with interactive exercises.',
         'review_unit': 'Review Unit',
         'start_unit': 'Start Unit',
@@ -85,13 +133,41 @@ TRANSLATIONS = {
         'ai_learning_assistant': 'AI Learning Assistant',
         'ask_course_question': 'Ask any question about the course material',
         'your_question': 'Your question',
-        'ask_ai_placeholder': 'Ask anything about AI concepts...',
+        'ask_ai_placeholder': 'Ask anything about course materials...',
         'ask_assistant': 'Ask Assistant',
         'assistant_response': 'Assistant\'s Response',
         'ask_another_question': 'Ask Another Question',
+        'email': 'Email',
+        'confirm_password': 'Confirm Password',
+        'reset_password': 'Reset Password',
+        'forgot_password': 'Forgot Password',
+        'email_verification': 'Email Verification',
+        'source_documents': 'Source Documents',
+        'quiz_completed': 'Quiz Completed',
+        'passed': 'Passed', 
+        'not_passed': 'Not Passed',
+        'unknown_date': 'Unknown date',
+        'quiz_already_taken': 'You have already taken this quiz. Click below to review your answers and explanations.',
+        'review_quiz_results': 'Review Quiz Results',
+        'test_knowledge': 'Test your knowledge with this unit quiz. You can only take this quiz once, so make sure you are ready!',
+        'important': 'Important',
+        'quiz_one_attempt_warning': 'This quiz can only be taken once. Make sure you have studied the material before proceeding.',
+        'take_quiz_one_attempt': 'Take Quiz (One Attempt Only)',
+        'no_quiz_available': 'No quiz available for this unit yet.',
+        'quiz_review_mode': 'Quiz Review Mode',
+        'quiz_review': 'Quiz Review',
+        'completed_on': 'Completed on',
+        'note': 'Note',
+        'quiz_one_attempt_note': 'This quiz can only be taken once. Below is your review showing your answers, the correct answers, and explanations.',
+        'correct': 'Correct',
+        'incorrect': 'Incorrect',
+        'your_answer': 'Your Answer',
+        'correct_answer': 'Correct Answer',
+        'explanation': 'Explanation',
+        'back_to_unit': 'Back to Unit'
     },
     'zh': {
-        'welcome': '欢迎来到51Talk人工智能学习平台',
+        'welcome': '51Talk 智能中心',
         'login': '登录',
         'register': '注册',
         'username': '用户名',
@@ -120,7 +196,6 @@ TRANSLATIONS = {
         'account': '账户',
         'language': '语言',
         'save': '保存',
-        # New keys for enhanced translation
         'learn_unit_desc': '学习基本概念并通过互动练习进行练习。',
         'review_unit': '复习单元',
         'start_unit': '开始单元',
@@ -139,13 +214,19 @@ TRANSLATIONS = {
         'ai_learning_assistant': 'AI学习助手',
         'ask_course_question': '提出任何关于课程材料的问题',
         'your_question': '您的问题',
-        'ask_ai_placeholder': '询问任何关于AI概念的问题...',
+        'ask_ai_placeholder': '询问任何关于课程材料的问题...',
         'ask_assistant': '询问助手',
         'assistant_response': '助手的回答',
         'ask_another_question': '提出另一个问题',
+        'email': '电子邮件',
+        'confirm_password': '确认密码',
+        'reset_password': '重置密码',
+        'forgot_password': '忘记密码',
+        'email_verification': '电子邮件验证',
+        'source_documents': '参考文档',
     },
     'ar': {
-        'welcome': 'مرحباً بك في منصة 51Talk للتعلم بالذكاء الاصطناعي',
+        'welcome': '51Talk مركز الذكاءالاصطناعي',
         'login': 'تسجيل الدخول',
         'register': 'التسجيل',
         'username': 'اسم المستخدم',
@@ -174,7 +255,6 @@ TRANSLATIONS = {
         'account': 'الحساب',
         'language': 'اللغة',
         'save': 'حفظ',
-        # New keys for enhanced translation
         'learn_unit_desc': 'تعلم المفاهيم الأساسية وتدرب باستخدام التمارين التفاعلية.',
         'review_unit': 'مراجعة الوحدة',
         'start_unit': 'بدء الوحدة',
@@ -193,286 +273,242 @@ TRANSLATIONS = {
         'ai_learning_assistant': 'مساعد التعلم بالذكاء الاصطناعي',
         'ask_course_question': 'اطرح أي سؤال حول مواد الدورة',
         'your_question': 'سؤالك',
-        'ask_ai_placeholder': 'اسأل أي شيء عن مفاهيم الذكاء الاصطناعي...',
+        'ask_ai_placeholder': 'اسأل أي شيء عن مواد الدورة...',
         'ask_assistant': 'اسأل المساعد',
         'assistant_response': 'رد المساعد',
         'ask_another_question': 'اطرح سؤالاً آخر',
+        'email': 'البريد الإلكتروني',
+        'confirm_password': 'تأكيد كلمة المرور',
+        'reset_password': 'إعادة تعيين كلمة المرور',
+        'forgot_password': 'نسيت كلمة المرور',
+        'email_verification': 'التحقق من البريد الإلكتروني',
+        'source_documents': 'المستندات المصدر',
     }
 }
 
-# Initialize Gemini
-try:
-    llm = ChatGoogleGenerativeAI(
-        model="gemini-1.5-flash-latest",
-        google_api_key=os.getenv("GEMINI_API_KEY"),
-        temperature=0.7
-    )
-except Exception as e:
-    print(f"Error initializing Gemini: {str(e)}")
-    llm = None
+# ==============================================
+# UTILITY FUNCTIONS
+# ==============================================
 
-# ---------- BEFORE REQUEST ----------
-@app.before_request
-def before_request():
-    """Ensure language is set before each request"""
-    # Don't override language if it's already set in the session
-    if 'language' not in session:
-        if 'username' in session:
-            try:
-                with sqlite3.connect(DB_NAME) as conn:
-                    cursor = conn.cursor()
-                    cursor.execute("SELECT language FROM users WHERE name=?", (session['username'],))
-                    result = cursor.fetchone()
-                    if result and result[0]:
-                        session['language'] = result[0]
-                        print(f"Setting language to {result[0]} from database")
-                    else:
-                        session['language'] = 'en'
-                        print(f"No language found for user, defaulting to 'en'")
-            except Exception as e:
-                print(f"Error retrieving language from database: {str(e)}")
-                session['language'] = 'en'
+def init_db_pool() -> None:
+    """Initialize the database connection pool."""
+    global db_connection_pool
+    try:
+        if db_connection_pool is None or db_connection_pool.closed:
+            db_connection_pool = psycopg2.pool.SimpleConnectionPool(
+                1,  # minconn
+                10,  # maxconn
+                host=os.getenv('DB_HOST', 'localhost'),
+                port=os.getenv('DB_PORT', '5432'),
+                database=os.getenv('DB_NAME', 'fiftyone_learning'),
+                user=os.getenv('DB_USER', 'admin'),
+                password=os.getenv('DB_PASSWORD', 'admin123')
+            )
+            logger.info("PostgreSQL connection pool established successfully")
+    except Exception as e:
+        logger.error(f"Failed to create database connection pool: {str(e)}")
+        db_connection_pool = None
+
+def get_db_connection() -> psycopg2.extensions.connection:
+    """Get a database connection from the pool."""
+    global db_connection_pool
+    
+    if db_connection_pool is None or db_connection_pool.closed:
+        init_db_pool()
+    
+    try:
+        if db_connection_pool is not None and not db_connection_pool.closed:
+            conn = db_connection_pool.getconn()
+            return conn
         else:
-            session['language'] = 'en'
-            print("No user logged in, defaulting to 'en'")
+            logger.warning("Connection pool not available, creating direct connection")
+            conn = psycopg2.connect(
+                host=os.getenv('DB_HOST', 'localhost'),
+                port=os.getenv('DB_PORT', '5432'),
+                database=os.getenv('DB_NAME', 'fiftyone_learning'),
+                user=os.getenv('DB_USER', 'admin'),
+                password=os.getenv('DB_PASSWORD', 'admin123')
+            )
+            return conn
+    except Exception as e:
+        logger.error(f"Failed to get database connection: {str(e)}")
+        raise
 
-# ---------- AFTER REQUEST ----------
-@app.after_request
-def add_header(response):
-    """Add headers to prevent caching"""
-    response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, post-check=0, pre-check=0, max-age=0'
-    response.headers['Pragma'] = 'no-cache'
-    response.headers['Expires'] = '-1'
-    return response
-
-# ---------- CONTEXT PROCESSOR ----------
-@app.context_processor
-def inject_globals():
-    """Make important variables available to all templates"""
-    return {
-        'LANGUAGES': LANGUAGES,
-        'get_text': get_text,
-        'current_language': session.get('language', 'en')
-    }
-
-# ---------- DATABASE UTILITIES ----------
-def get_tables():
-    """Get all table names from the database"""
-    with sqlite3.connect(DB_NAME) as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
-        tables = cursor.fetchall()
-        return [table[0] for table in tables]
-
-def get_table_columns(table_name):
-    """Get column names for a specific table"""
-    with sqlite3.connect(DB_NAME) as conn:
-        cursor = conn.cursor()
-        cursor.execute(f"PRAGMA table_info({table_name})")
-        columns = cursor.fetchall()
-        return [col[1] for col in columns]
-
-def check_and_create_words_table():
-    """Ensure words table exists with proper columns"""
-    with sqlite3.connect(DB_NAME) as conn:
-        cursor = conn.cursor()
+def release_db_connection(conn: Optional[psycopg2.extensions.connection]) -> None:
+    """Return a connection to the pool."""
+    global db_connection_pool
+    
+    if conn is None:
+        return
         
-        # Check if words table exists
-        tables = get_tables()
-        if 'words' not in tables:
-            # Create new words table
-            cursor.execute('''CREATE TABLE words (
-                            id INTEGER PRIMARY KEY AUTOINCREMENT,
-                            unit_id INTEGER,
-                            word TEXT,
-                            definition TEXT,
-                            example TEXT,
-                            section INTEGER DEFAULT 1)''')
-            conn.commit()
-            print("Created words table")
-            return True
-        return True
-
-def reset_database():
-    """Delete all data from the database but keep the tables"""
-    with sqlite3.connect(DB_NAME) as conn:
-        cursor = conn.cursor()
+    try:
+        if db_connection_pool is not None and not db_connection_pool.closed:
+            db_connection_pool.putconn(conn)
+        else:
+            conn.close()
+    except Exception as e:
+        logger.error(f"Failed to release connection: {str(e)}")
         try:
-            # Delete all user data
-            cursor.execute("DELETE FROM users")
-            
-            # Delete all content
-            cursor.execute("DELETE FROM quizzes")
-            cursor.execute("DELETE FROM projects")
-            cursor.execute("DELETE FROM materials")
-            cursor.execute("DELETE FROM videos")
-            
-            # Check if words table exists before trying to delete
-            if 'words' in get_tables():
-                cursor.execute("DELETE FROM words")  # Added for words table
-            
-            # Delete all progress
-            cursor.execute("DELETE FROM progress")
-            cursor.execute("DELETE FROM quiz_attempts")
-            cursor.execute("DELETE FROM submissions")
-            
-            # Delete user activity
-            cursor.execute("DELETE FROM qa_history")
-            cursor.execute("DELETE FROM feedback")
-            
-            # Delete all files in the upload folder
-            for file in os.listdir(UPLOAD_FOLDER):
-                file_path = os.path.join(UPLOAD_FOLDER, file)
-                try:
-                    if os.path.isfile(file_path):
-                        os.unlink(file_path)
-                except Exception as e:
-                    print(f"Error deleting file {file_path}: {e}")
-            
-            # Keep admin users, just reset the admin user
-            cursor.execute("DELETE FROM admin_users WHERE username != 'admin'")
-            
-            # Reset admin user password
-            admin_password = os.getenv("ADMIN_PASSWORD", "admin123")
-            hashed_password = generate_password_hash(admin_password)
-            cursor.execute("UPDATE admin_users SET password = ? WHERE username = 'admin'", (hashed_password,))
-            
-            conn.commit()
-            print("Database reset successfully")
-            
-            # Re-add admin if needed
-            check_and_fix_admin_table()
-            
-            return True
-        except sqlite3.Error as e:
-            print(f"Error resetting database: {e}")
-            return False
+            conn.close()
+        except Exception:
+            pass
 
-def check_and_fix_admin_table():
-    """Ensure admin table has proper data"""
-    with sqlite3.connect(DB_NAME) as conn:
-        cursor = conn.cursor()
-        
-        # Check if admin_users table exists
-        tables = get_tables()
-        if 'admin_users' not in tables:
-            cursor.execute('''CREATE TABLE admin_users (
-                            id INTEGER PRIMARY KEY AUTOINCREMENT,
-                            username TEXT UNIQUE,
-                            password TEXT)''')
-        
-        # Check if admin user exists and has proper password
-        cursor.execute("SELECT id, username, password FROM admin_users WHERE username='admin'")
-        admin = cursor.fetchone()
-        
-        # If admin doesn't exist, or password is NULL/empty, recreate it
-        if not admin or not admin[2]:
-            if admin:  # If exists but no proper password
-                cursor.execute("DELETE FROM admin_users WHERE username='admin'")
-            
-            admin_password = os.getenv("ADMIN_PASSWORD", "admin123")
-            hashed_password = generate_password_hash(admin_password)
-            cursor.execute("INSERT INTO admin_users (username, password) VALUES (?, ?)", 
-                         ('admin', hashed_password))
-            conn.commit()
-            print("Admin user recreated with default password")
-        
-def check_and_fix_feedback_table():
-    """Ensure feedback table has proper columns"""
-    with sqlite3.connect(DB_NAME) as conn:
-        cursor = conn.cursor()
-        
-        # Check if feedback table exists
-        tables = get_tables()
-        if 'feedback' not in tables:
-            # Create new feedback table
-            cursor.execute('''CREATE TABLE feedback (
-                            id INTEGER PRIMARY KEY AUTOINCREMENT,
-                            user_id INTEGER,
-                            feedback_text TEXT,
-                            rating INTEGER,
-                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                            FOREIGN KEY(user_id) REFERENCES users(id))''')
-            conn.commit()
-            return
-        
-        # Check if feedback_text column exists
-        columns = get_table_columns('feedback')
-        
-        if 'feedback_text' not in columns:
-            # Rename the old table
-            cursor.execute("ALTER TABLE feedback RENAME TO feedback_old")
-            
-            # Create new table with correct columns
-            cursor.execute('''CREATE TABLE feedback (
-                            id INTEGER PRIMARY KEY AUTOINCREMENT,
-                            user_id INTEGER,
-                            feedback_text TEXT,
-                            rating INTEGER,
-                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                            FOREIGN KEY(user_id) REFERENCES users(id))''')
-            
-            # Try to migrate data if possible
-            try:
-                cursor.execute('''INSERT INTO feedback (id, user_id, rating, created_at)
-                                SELECT id, user_id, rating, created_at FROM feedback_old''')
-            except:
-                pass
-                
-            # Drop old table
-            cursor.execute("DROP TABLE feedback_old")
-            conn.commit()
-            print("Fixed feedback table structure")
+def generate_verification_code(length: int = 32) -> str:
+    """Generate a random verification code."""
+    chars = string.ascii_letters + string.digits
+    return ''.join(random.choice(chars) for _ in range(length))
 
-# ---------- HELPER FUNCTIONS ----------
-def get_text(key):
-    """Get translated text based on current language"""
+def send_verification_email(email: str, verification_code: str) -> bool:
+    """Send verification email to a user."""
+    try:
+        verification_link = url_for('verify_email', code=verification_code, _external=True)
+        
+        msg = Message('Verify Your Email - 51Talk AI Learning', recipients=[email])
+        msg.body = f'''Please verify your email by clicking on the link below:
+{verification_link}
+
+If you did not create an account, please ignore this email.
+'''
+        msg.html = f'''
+<h1>Email Verification</h1>
+<p>Thank you for registering with 51Talk AI Learning Platform!</p>
+<p>Please verify your email by clicking on the link below:</p>
+<p><a href="{verification_link}" style="background-color: #4CAF50; color: white; padding: 10px 15px; text-align: center; text-decoration: none; display: inline-block; border-radius: 5px;">Verify Email</a></p>
+<p>If you did not create an account, please ignore this email.</p>
+<p>Best regards,<br>51Talk AI Learning Team</p>
+'''
+        
+        mail.send(msg)
+        logger.info(f"Verification email sent to {email}")
+        return True
+    except Exception as e:
+        logger.error(f"Failed to send verification email: {str(e)}")
+        return False
+
+def login_required(f: Callable) -> Callable:
+    """Decorator that checks if user is logged in."""
+    @wraps(f)
+    def decorated_function(*args: Any, **kwargs: Any) -> Any:
+        if 'user_id' not in session:
+            flash('Please log in to access this page.', 'error')
+            return redirect(url_for('login'))
+        return f(*args, **kwargs)
+    return decorated_function
+
+def admin_required(f: Callable) -> Callable:
+    """Decorator that checks if user has admin privileges."""
+    @wraps(f)
+    def decorated_function(*args: Any, **kwargs: Any) -> Any:
+        if not session.get('admin'):
+            flash('Admin access required', 'danger')
+            return redirect(url_for('admin_login'))
+        return f(*args, **kwargs)
+    return decorated_function
+
+def get_text(key: str) -> str:
+    """Get translated text based on current language."""
     lang = session.get('language', 'en')
-    # First try to get text from translations
     text = TRANSLATIONS.get(lang, {}).get(key)
-    # If not found in current language, fall back to English
     if text is None:
         text = TRANSLATIONS.get('en', {}).get(key)
-    # If still not found, return the key itself as fallback
     if text is None:
         text = key
     return text
 
-def allowed_file(filename):
-    return '.' in filename and \
-           filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+def allowed_file(filename: str) -> bool:
+    """Check if a file has an allowed extension."""
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
-def get_user_id(username):
-    with sqlite3.connect(DB_NAME) as conn:
+def get_user_id(username: str) -> Optional[int]:
+    """Get user ID by username."""
+    try:
+        conn = get_db_connection()
         cursor = conn.cursor()
-        cursor.execute("SELECT id FROM users WHERE name=?", (username,))
+        cursor.execute("SELECT id FROM users WHERE username = %s", (username,))
         result = cursor.fetchone()
+        cursor.close()
+        release_db_connection(conn)
         return result[0] if result else None
+    except Exception as e:
+        logger.error(f"Error in get_user_id: {str(e)}")
+        return None
 
-def get_progress(user_id, unit_id):
-    with sqlite3.connect(DB_NAME) as conn:
+def get_progress(user_id: int, unit_id: int) -> Tuple[int, int, int]:
+    """Get user progress for a specific unit."""
+    try:
+        conn = get_db_connection()
         cursor = conn.cursor()
-        cursor.execute("SELECT completed, quiz_score, project_completed FROM progress WHERE user_id=? AND unit_number=?", 
-                      (user_id, unit_id))
+        cursor.execute("""
+            SELECT completed, quiz_score, project_completed 
+            FROM progress 
+            WHERE user_id = %s AND unit_number = %s
+        """, (user_id, unit_id))
         result = cursor.fetchone()
+        cursor.close()
+        release_db_connection(conn)
         return result if result else (0, 0, 0)
+    except Exception as e:
+        logger.error(f"Error in get_progress: {str(e)}")
+        return (0, 0, 0)
 
-def has_attempted_quiz(user_id, unit_id):
-    with sqlite3.connect(DB_NAME) as conn:
+def has_attempted_quiz(user_id: int, unit_id: int) -> bool:
+    """Check if a user has attempted a quiz."""
+    try:
+        conn = get_db_connection()
         cursor = conn.cursor()
-        cursor.execute("SELECT COUNT(*) FROM quiz_attempts WHERE user_id=? AND unit_id=?", (user_id, unit_id))
-        return cursor.fetchone()[0] > 0
-
-def get_admin_stats():
-    with sqlite3.connect(DB_NAME) as conn:
-        cursor = conn.cursor()
-        stats = {}
+        cursor.execute("""
+            SELECT COUNT(*) 
+            FROM quiz_attempts 
+            WHERE user_id = %s AND unit_id = %s
+        """, (user_id, unit_id))
+        result = cursor.fetchone()[0] > 0
+        cursor.close()
+        release_db_connection(conn)
+        return result
+    except Exception as e:
+        logger.error(f"Error in has_attempted_quiz: {str(e)}")
+        return False
+def get_quiz_attempt_info(user_id: int, unit_id: int) -> Optional[Dict[str, Any]]:
+    """Get detailed information about a user's quiz attempt."""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            SELECT score, attempted_at, passed
+            FROM quiz_attempts 
+            WHERE user_id = %s AND unit_id = %s
+            ORDER BY attempted_at DESC
+            LIMIT 1
+        """, (user_id, unit_id))
+        result = cursor.fetchone()
+        cursor.close()
+        release_db_connection(conn)
         
-        # User counts
+        if result:
+            return {
+                'score': result['score'],
+                'attempted_at': result['attempted_at'],
+                'passed': result['passed']
+            }
+        return None
+    except Exception as e:
+        logger.error(f"Error in get_quiz_attempt_info: {str(e)}")
+        return None
+
+def can_take_quiz(user_id: int, unit_id: int) -> bool:
+    """Check if a user can take a quiz (hasn't attempted it yet)."""
+    return not has_attempted_quiz(user_id, unit_id)
+
+def get_admin_stats() -> Dict[str, int]:
+    """Get statistics for admin dashboard."""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        stats: Dict[str, int] = {}
+        
         cursor.execute("SELECT COUNT(*) FROM users")
         stats['total_users'] = cursor.fetchone()[0]
         
-        # Content counts
         cursor.execute("SELECT COUNT(*) FROM quizzes")
         stats['total_quizzes'] = cursor.fetchone()[0]
         
@@ -485,35 +521,53 @@ def get_admin_stats():
         cursor.execute("SELECT COUNT(*) FROM projects")
         stats['total_projects'] = cursor.fetchone()[0]
         
-        # Submissions count
         cursor.execute("SELECT COUNT(*) FROM submissions")
         stats['total_submissions'] = cursor.fetchone()[0]
         
-        # Recent activity
-        try:
-            cursor.execute("SELECT COUNT(*) FROM qa_history WHERE date(created_at) = date('now')")
-            stats['today_qa'] = cursor.fetchone()[0]
-            
-            cursor.execute("SELECT COUNT(*) FROM quiz_attempts WHERE date(attempted_at) = date('now')")
-            stats['today_quiz_attempts'] = cursor.fetchone()[0]
-        except sqlite3.Error:
-            stats['today_qa'] = 0
-            stats['today_quiz_attempts'] = 0
+        cursor.execute("SELECT COUNT(*) FROM qa_history WHERE date(created_at) = CURRENT_DATE")
+        stats['today_qa'] = cursor.fetchone()[0]
         
-        return stats
+        cursor.execute("SELECT COUNT(*) FROM quiz_attempts WHERE date(attempted_at) = CURRENT_DATE")
+        stats['today_quiz_attempts'] = cursor.fetchone()[0]
+        
+        cursor.execute("SELECT COUNT(*) FROM teams")
+        stats['total_teams'] = cursor.fetchone()[0]
 
-def generate_csv_file(data, filename, headers=None):
-    """Create a CSV file from data"""
+        document_count = 0
+        for root, _, files in os.walk(DOCUMENTS_DIR):
+            for file in files:
+                if file.endswith('.pdf') or file.endswith('.ppt') or file.endswith('.pptx'):
+                    document_count += 1
+        stats['total_documents'] = document_count
+        
+        cursor.close()
+        release_db_connection(conn)
+        return stats
+    except Exception as e:
+        logger.error(f"Error in get_admin_stats: {str(e)}")
+        return {
+            'total_users': 0,
+            'total_quizzes': 0,
+            'total_materials': 0,
+            'total_videos': 0,
+            'total_projects': 0,
+            'total_submissions': 0,
+            'today_qa': 0,
+            'today_quiz_attempts': 0,
+            'total_teams': 0,
+            'total_documents': 0
+        }
+
+def generate_csv_file(data: List, filename: str, headers: Optional[List[str]] = None) -> Optional[str]:
+    """Create a CSV file from data."""
     temp_file = tempfile.NamedTemporaryFile(delete=False, mode='w', suffix='.csv')
     
     try:
         writer = csv.writer(temp_file)
         
-        # Write headers if provided
         if headers:
             writer.writerow(headers)
         
-        # Write data rows
         for row in data:
             writer.writerow(row)
             
@@ -522,169 +576,217 @@ def generate_csv_file(data, filename, headers=None):
     except Exception as e:
         temp_file.close()
         os.unlink(temp_file.name)
-        print(f"Error generating CSV: {str(e)}")
+        logger.error(f"Error generating CSV: {str(e)}")
         return None
 
-# Admin decorator
-def admin_required(f):
-    @wraps(f)
-    def decorated_function(*args, **kwargs):
-        if not session.get('admin'):
-            flash('Admin access required', 'danger')
-            return redirect(url_for('admin_login'))
-        return f(*args, **kwargs)
-    return decorated_function
-
-# ---------- DATABASE SETUP ----------
-def init_db(reset=False):
-    """Initialize the database and optionally reset all data"""
-    if reset:
-        reset_database()
-        
-    with sqlite3.connect(DB_NAME) as conn:
+def update_team_score(user_id: int, score_to_add: int) -> None:
+    """Update a team's score based on user activity."""
+    conn = None
+    try:
+        conn = get_db_connection()
         cursor = conn.cursor()
         
-        # Check if language column exists in users table
-        try:
-            cursor.execute("PRAGMA table_info(users)")
-            columns = [info[1] for info in cursor.fetchall()]
+        cursor.execute("""
+            SELECT tm.team_id 
+            FROM team_members tm
+            WHERE tm.user_id = %s
+        """, (user_id,))
+        
+        result = cursor.fetchone()
+        if not result:
+            return
             
-            # Create or alter users table
-            if 'users' not in get_tables():
-                # User tables - create from scratch with language column
-                cursor.execute('''CREATE TABLE IF NOT EXISTS users (
-                                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                                    name TEXT UNIQUE,
-                                    password TEXT,
-                                    language TEXT DEFAULT 'en')''')
-            elif 'language' not in columns:
-                # Add language column if it doesn't exist
-                cursor.execute("ALTER TABLE users ADD COLUMN language TEXT DEFAULT 'en'")
-        except sqlite3.Error as e:
-            print(f"Error setting up users table: {str(e)}")
-
-        # Progress tracking
-        cursor.execute('''CREATE TABLE IF NOT EXISTS progress (
-                            id INTEGER PRIMARY KEY AUTOINCREMENT,
-                            user_id INTEGER,
-                            unit_number INTEGER,
-                            completed INTEGER DEFAULT 0,
-                            quiz_score INTEGER DEFAULT 0,
-                            project_completed INTEGER DEFAULT 0,
-                            FOREIGN KEY(user_id) REFERENCES users(id))''')
+        team_id = result[0]
         
-        # Ensure unique constraint for user_id and unit_number combination
-        try:
-            cursor.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_user_unit ON progress(user_id, unit_number)")
-        except sqlite3.Error:
-            pass
+        cursor.execute("""
+            SELECT id FROM team_scores WHERE team_id = %s
+        """, (team_id,))
         
-        # Content tables
-        cursor.execute('''CREATE TABLE IF NOT EXISTS quizzes (
-                            id INTEGER PRIMARY KEY AUTOINCREMENT,
-                            unit_id INTEGER,
-                            question TEXT,
-                            options TEXT,
-                            correct_answer INTEGER,
-                            explanation TEXT)''')
-        
-        cursor.execute('''CREATE TABLE IF NOT EXISTS projects (
-                            id INTEGER PRIMARY KEY AUTOINCREMENT,
-                            unit_id INTEGER,
-                            title TEXT,
-                            description TEXT,
-                            resources TEXT)''')
-        
-        cursor.execute('''CREATE TABLE IF NOT EXISTS materials (
-                            id INTEGER PRIMARY KEY AUTOINCREMENT,
-                            unit_id INTEGER,
-                            title TEXT,
-                            content TEXT,
-                            file_path TEXT)''')
-        
-        cursor.execute('''CREATE TABLE IF NOT EXISTS videos (
-                            id INTEGER PRIMARY KEY AUTOINCREMENT,
-                            unit_id INTEGER,
-                            title TEXT,
-                            youtube_url TEXT,
-                            description TEXT)''')
-        
-        # Add words table with section column
-        cursor.execute('''CREATE TABLE IF NOT EXISTS words (
-                            id INTEGER PRIMARY KEY AUTOINCREMENT,
-                            unit_id INTEGER,
-                            word TEXT,
-                            definition TEXT,
-                            example TEXT,
-                            section INTEGER DEFAULT 1)''')
-        
-        # Activity tracking
-        cursor.execute('''CREATE TABLE IF NOT EXISTS qa_history (
-                            id INTEGER PRIMARY KEY AUTOINCREMENT,
-                            user_id INTEGER,
-                            question TEXT,
-                            answer TEXT,
-                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                            FOREIGN KEY(user_id) REFERENCES users(id))''')
-        
-        cursor.execute('''CREATE TABLE IF NOT EXISTS quiz_attempts (
-                            id INTEGER PRIMARY KEY AUTOINCREMENT,
-                            user_id INTEGER,
-                            unit_id INTEGER,
-                            score INTEGER,
-                            attempted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                            FOREIGN KEY(user_id) REFERENCES users(id))''')
-        
-        cursor.execute('''CREATE TABLE IF NOT EXISTS submissions (
-                            id INTEGER PRIMARY KEY AUTOINCREMENT,
-                            user_id INTEGER,
-                            unit_id INTEGER,
-                            file_path TEXT,
-                            submitted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                            FOREIGN KEY(user_id) REFERENCES users(id))''')
-        
-        # Feedback system - with corrected schema
-        cursor.execute('''CREATE TABLE IF NOT EXISTS feedback (
-                            id INTEGER PRIMARY KEY AUTOINCREMENT,
-                            user_id INTEGER,
-                            feedback_text TEXT,
-                            rating INTEGER,
-                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                            FOREIGN KEY(user_id) REFERENCES users(id))''')
-        
-        # Admin tables
-        cursor.execute('''CREATE TABLE IF NOT EXISTS admin_users (
-                            id INTEGER PRIMARY KEY AUTOINCREMENT,
-                            username TEXT UNIQUE,
-                            password TEXT)''')
-        
-    # After creating tables, check and fix any issues
-    check_and_fix_admin_table()
-    check_and_fix_feedback_table()
-    check_and_create_words_table()
-
-# Add sample data
-def add_sample_data():
-    with sqlite3.connect(DB_NAME) as conn:
-        cursor = conn.cursor()
-        
-        # Sample quiz data - removing this as we'll add through the admin interface
-        pass
-        
-        # Sample project - removing this as we'll add through the admin interface  
-        pass
-        
-        # Sample video - removing this as we'll add through the admin interface
-        pass
-        
-        # Sample material - removing this as we'll add through the admin interface
-        pass
-
+        if cursor.fetchone():
+            cursor.execute("""
+                UPDATE team_scores 
+                SET score = score + %s, updated_at = CURRENT_TIMESTAMP
+                WHERE team_id = %s
+            """, (score_to_add, team_id))
+        else:
+            cursor.execute("""
+                INSERT INTO team_scores (team_id, score)
+                VALUES (%s, %s)
+            """, (team_id, score_to_add))
+            
         conn.commit()
+    except Exception as e:
+        if conn:
+            conn.rollback()
+        logger.error(f"Error updating team score: {str(e)}")
+    finally:
+        if conn:
+            cursor.close()
+            release_db_connection(conn)
 
-# ---------- ROUTES ----------
+def get_document_list() -> List[Dict[str, Any]]:
+    """Get a list of documents available for Q&A."""
+    documents = []
+    try:
+        for root, _, files in os.walk(DOCUMENTS_DIR):
+            for file in files:
+                if file.endswith('.pdf') or file.endswith('.ppt') or file.endswith('.pptx'):
+                    file_path = os.path.join(root, file)
+                    file_size = os.path.getsize(file_path)
+                    documents.append({
+                        'name': file,
+                        'size': f"{file_size / 1024 / 1024:.2f} MB",
+                        'type': file.split('.')[-1].upper(),
+                        'added': datetime.fromtimestamp(os.path.getctime(file_path)).strftime('%Y-%m-%d %H:%M:%S'),
+                        'path': os.path.relpath(root, DOCUMENTS_DIR)
+                    })
+    except Exception as e:
+        logger.error(f"Error listing documents: {str(e)}")
+    return documents
+
+def save_qa_history_async(user_id: int, question: str, answer: str):
+    """Save QA history asynchronously to avoid blocking main thread."""
+    conn = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO qa_history (user_id, question, answer)
+            VALUES (%s, %s, %s)
+        """, (user_id, question, answer))
+        conn.commit()
+        cursor.close()
+        logger.debug(f"QA history saved successfully for user {user_id}")
+    except Exception as e:
+        logger.error(f"Error saving QA history async: {str(e)}")
+    finally:
+        if conn:
+            release_db_connection(conn)
+
+def initialize_document_qa_system():
+    """Initialize the SimpleQA system when the Flask app starts."""
+    try:
+        documents_dir = DOCUMENTS_DIR
+        
+        if not os.path.exists(documents_dir):
+            logger.warning(f"Documents directory not found: {documents_dir}")
+            logger.info("Creating documents directory...")
+            os.makedirs(documents_dir, exist_ok=True)
+            logger.info(f"Please add your course materials to: {documents_dir}")
+            return
+        
+        supported_files = []
+        for root, dirs, files in os.walk(documents_dir):
+            for file in files:
+                if file.lower().endswith(('.pdf', '.pptx', '.ppt', '.txt')):
+                    supported_files.append(file)
+        
+        if not supported_files:
+            logger.warning(f"No supported documents found in {documents_dir}")
+            logger.info("Supported formats: PDF (.pdf), PowerPoint (.pptx, .ppt), Text (.txt)")
+            return
+        
+        logger.info(f"Found {len(supported_files)} document(s) to process")
+        logger.info("Starting SimpleQA initialization in background...")
+        
+        def init_in_background():
+            try:
+                qa_system = get_qa_system(
+                    documents_dir=documents_dir,
+                    llama_model_path=LLAMA_MODEL_PATH
+                )
+                if qa_system.is_ready():
+                    logger.info("SimpleQA initialization completed successfully")
+                else:
+                    logger.warning("SimpleQA initialization completed but system not ready")
+            except Exception as e:
+                logger.error(f"Failed to initialize SimpleQA: {str(e)}")
+        
+        init_thread = threading.Thread(target=init_in_background, daemon=True)
+        init_thread.start()
+        
+    except Exception as e:
+        logger.error(f"Error starting SimpleQA initialization: {str(e)}")
+
+def cleanup_simple_qa():
+    """Cleanup function for graceful shutdown."""
+    try:
+        from document_qa import get_document_qa
+        document_qa = get_document_qa()
+        if document_qa and hasattr(document_qa, 'vector_store_manager'):
+            logger.info("Cleaning up DocumentQA resources...")
+        logger.info("DocumentQA cleanup completed")
+    except Exception as e:
+        logger.error(f"Error during DocumentQA cleanup: {str(e)}")
+
+# ==============================================
+# APPLICATION HOOKS
+# ==============================================
+
+@app.before_request
+def before_request() -> None:
+    """Ensure language is set before each request."""
+    if 'language' not in session:
+        if 'user_id' in session:
+            try:
+                conn = get_db_connection()
+                cursor = conn.cursor()
+                cursor.execute("SELECT language FROM users WHERE id = %s", (session['user_id'],))
+                result = cursor.fetchone()
+                cursor.close()
+                release_db_connection(conn)
+                
+                if result and result[0]:
+                    session['language'] = result[0]
+                    logger.info(f"Setting language to {result[0]} from database for user {session['user_id']}")
+                else:
+                    session['language'] = 'en'
+                    logger.info(f"No language found for user, defaulting to 'en'")
+            except Exception as e:
+                logger.error(f"Error retrieving language from database: {str(e)}")
+                session['language'] = 'en'
+        else:
+            session['language'] = 'en'
+            logger.debug("No user logged in, defaulting to 'en'")
+
+@app.after_request
+def add_header(response: Any) -> Any:
+    """Add headers to prevent caching."""
+    response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, post-check=0, pre-check=0, max-age=0'
+    response.headers['Pragma'] = 'no-cache'
+    response.headers['Expires'] = '-1'
+    return response
+
+@app.context_processor
+def inject_globals() -> Dict[str, Any]:
+    """Make important variables available to all templates."""
+    return {
+        'LANGUAGES': LANGUAGES,
+        'get_text': get_text,
+        'current_language': session.get('language', 'en'),
+        'get_quiz_attempt_info': get_quiz_attempt_info,
+        'has_attempted_quiz': has_attempted_quiz,
+        'can_take_quiz': can_take_quiz
+    }
+
+@app.teardown_appcontext
+def close_db_pool(e: Optional[Exception] = None) -> None:
+    """Close the database connection pool when the application context ends."""
+    global db_connection_pool
+    try:
+        if db_connection_pool and not db_connection_pool.closed:
+            db_connection_pool.closeall()
+            logger.info("Connection pool closed")
+    except Exception as e:
+        logger.error(f"Error closing connection pool: {str(e)}")
+
+# ==============================================
+# MAIN APPLICATION ROUTES
+# ==============================================
+
 @app.route('/', methods=['GET', 'POST'])
-def password_gate():
+def password_gate() -> Any:
+    """Handle the initial password gate to access the application."""
     if request.method == 'POST':
         password = request.form.get('password')
         if password == ACCESS_PASSWORD:
@@ -694,180 +796,501 @@ def password_gate():
             flash('Incorrect password. Please try again.', 'error')
     return render_template('password_gate.html')
 
-@app.route('/home', methods=['GET', 'POST'])
-def home():
+@app.route('/home', methods=['GET'])
+def home() -> Any:
+    """Display the home page or redirect to dashboard if logged in."""
     if not session.get('authenticated'):
         return redirect(url_for('password_gate'))
     
-    if request.method == 'POST':
-        name = request.form['username']
-        if not name.strip():
-            flash('Username cannot be empty', 'error')
-            return redirect(url_for('home'))
-        
-        session['username'] = name
-        # Clear language first to avoid conflicts
-        session.pop('language', None)
-        session['language'] = 'en'  # Default language
-        print(f"Home: Setting default language 'en' for user {name}")
-        
-        with sqlite3.connect(DB_NAME) as conn:
-            try:
-                cursor = conn.cursor()
-                # Check if user exists and get language preference
-                cursor.execute("SELECT id, language FROM users WHERE name=?", (name,))
-                user = cursor.fetchone()
-                
-                if user:
-                    if user[1]:  # If language exists in database
-                        session['language'] = user[1]
-                        print(f"Home: Found language '{user[1]}' in database for user {name}")
-                    else:
-                        # Update language in database if it's null
-                        cursor.execute("UPDATE users SET language = 'en' WHERE name = ?", (name,))
-                        conn.commit()
-                else:
-                    # Create new user
-                    cursor.execute("INSERT INTO users (name, language) VALUES (?, ?)", (name, 'en'))
-                    conn.commit()
-                    print(f"Home: Created new user {name} with language 'en'")
-                
-                # Force the session to be saved
-                session.modified = True
-                
-                return redirect(url_for('dashboard'))
-            except sqlite3.Error as e:
-                flash(f'Error connecting to user: {str(e)}', 'error')
+    if 'user_id' in session:
+        return redirect(url_for('dashboard'))
     
     return render_template('index.html')
-@app.route('/download_material/<path:filename>')
-def download_material(filename):
-    if not session.get('authenticated'):
-        return redirect(url_for('password_gate'))
-    
-    if 'username' not in session:
-        return redirect(url_for('home'))
-    
-    try:
-        # Security check to prevent directory traversal
-        safe_filename = filename.replace('../', '').replace('..\\', '')
-        file_path = os.path.join(UPLOAD_FOLDER, safe_filename)
-        
-        return send_file(file_path, as_attachment=True)
-    except Exception as e:
-        flash(f"Error downloading file: {str(e)}", "error")
-        return redirect(request.referrer or url_for('dashboard'))
-
-@app.route('/dashboard')
-def dashboard():
-    if not session.get('authenticated'):
-        return redirect(url_for('password_gate'))
-    
-    if 'username' not in session:
-        return redirect(url_for('home'))
-    
-    username = session['username']
-    user_id = get_user_id(username)
-    
-    # Use current language from session, not from database
-    current_language = session.get('language', 'en')
-    print(f"Dashboard: Using language {current_language} for user {username}")
-    
-    with sqlite3.connect(DB_NAME) as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT COUNT(DISTINCT unit_number) FROM progress WHERE user_id=? AND completed=1", (user_id,))
-        completed_units = cursor.fetchone()[0] or 0
-    
-    return render_template('dashboard.html', 
-                         username=username, 
-                         completed_units=completed_units,
-                         current_language=current_language)  # Pass directly to template
 
 @app.route('/logout')
-def logout():
-    """Handle user logout for both regular users and admin users"""
+def logout() -> Any:
+    """Handle user logout for both regular users and admin users."""
     session.pop('authenticated', None)
     session.pop('username', None)
     session.pop('language', None)
     session.pop('admin', None)
     session.pop('admin_username', None)
+    session.pop('user_id', None)
     flash('You have been logged out', 'info')
     return redirect(url_for('password_gate'))
 
-@app.route('/set_language/<language>')
-def set_language(language):
-    if language in LANGUAGES:
-        # Clear any previous language setting first
-        session.pop('language', None)
+# ==============================================
+# USER AUTHENTICATION ROUTES
+# ==============================================
+
+@app.route('/register', methods=['GET', 'POST'])
+def register() -> Any:
+    """Handle user registration."""
+    if not session.get('authenticated'):
+        return redirect(url_for('password_gate'))
         
-        # Set the new language in session
-        session['language'] = language
+    if request.method == 'POST':
+        username = request.form.get('username')
+        email = request.form.get('email')
+        password = request.form.get('password')
+        confirm_password = request.form.get('confirm_password')
+
+        if not all([username, email, password, confirm_password]):
+            flash('All fields are required.', 'error')
+            return render_template('register.html')
         
-        # Update in database if user is logged in
-        if 'username' in session:
-            try:
-                with sqlite3.connect(DB_NAME) as conn:
-                    cursor = conn.cursor()
-                    # Update user's language in database
-                    cursor.execute("UPDATE users SET language=? WHERE name=?", 
-                                  (language, session['username']))
+        if password != confirm_password:
+            flash('Passwords do not match.', 'error')
+            return render_template('register.html')
+        
+        if not EMAIL_REGEX.match(email):
+            flash('Invalid email address.', 'error')
+            return render_template('register.html')
+        
+        if len(password) < 8:
+            flash('Password must be at least 8 characters long.', 'error')
+            return render_template('register.html')
+        
+        hashed_password = generate_password_hash(password)
+        verification_code = generate_verification_code()
+        
+        conn = None
+        try:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            
+            cursor.execute("SELECT username FROM users WHERE username = %s", (username,))
+            if cursor.fetchone():
+                flash('Username already exists.', 'error')
+                return render_template('register.html')
+                
+            cursor.execute("SELECT email FROM users WHERE email = %s", (email,))
+            if cursor.fetchone():
+                flash('Email already exists.', 'error')
+                return render_template('register.html')
+            
+            cursor.execute(
+                "INSERT INTO users (username, email, password, verification_code, language) VALUES (%s, %s, %s, %s, %s) RETURNING id",
+                (username, email, hashed_password, verification_code, 'en')
+            )
+            user_id = cursor.fetchone()[0]
+            conn.commit()
+            
+            if send_verification_email(email, verification_code):
+                flash('Registration successful! Please check your email to verify your account.', 'success')
+                return redirect(url_for('login'))
+            else:
+                flash('Registration successful but failed to send verification email. Please contact support.', 'warning')
+                return redirect(url_for('login'))
+                
+        except psycopg2.errors.UniqueViolation:
+            if conn:
+                conn.rollback()
+            flash('Username or email already exists.', 'error')
+            return render_template('register.html')
+        except Exception as e:
+            if conn:
+                conn.rollback()
+            logger.error(f"Registration error: {str(e)}")
+            flash('An error occurred during registration. Please try again.', 'error')
+            return render_template('register.html')
+        finally:
+            if conn:
+                cursor.close()
+                release_db_connection(conn)
+        
+    return render_template('register.html')
+
+@app.route('/verify-email/<code>')
+def verify_email(code: str) -> Any:
+    """Verify a user's email address with the provided code."""
+    if not session.get('authenticated'):
+        return redirect(url_for('password_gate'))
+        
+    conn = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute(
+            "SELECT id, email FROM users WHERE verification_code = %s AND email_verified = FALSE",
+            (code,)
+        )
+        user = cursor.fetchone()
+        
+        if user:
+            cursor.execute(
+                "UPDATE users SET email_verified = TRUE, verification_code = NULL WHERE id = %s",
+                (user[0],)
+            )
+            conn.commit()
+            flash('Email verified successfully! You can now log in.', 'success')
+        else:
+            flash('Invalid or expired verification link.', 'error')
+    except Exception as e:
+        if conn:
+            conn.rollback()
+        logger.error(f"Email verification error: {str(e)}")
+        flash('An error occurred during email verification.', 'error')
+    finally:
+        if conn:
+            cursor.close()
+            release_db_connection(conn)
+    
+    return redirect(url_for('login'))
+
+@app.route('/login', methods=['GET', 'POST'])
+def login() -> Any:
+    """Handle user login."""
+    if not session.get('authenticated'):
+        return redirect(url_for('password_gate'))
+        
+    if request.method == 'POST':
+        email = request.form.get('email')
+        password = request.form.get('password')
+        
+        if not email or not password:
+            flash('Email and password are required.', 'error')
+            return render_template('login.html')
+        
+        conn = None
+        try:
+            conn = get_db_connection()
+            cursor = conn.cursor(cursor_factory=RealDictCursor)
+            
+            cursor.execute(
+                "SELECT id, username, email, password, email_verified, language FROM users WHERE email = %s",
+                (email,)
+            )
+            user = cursor.fetchone()
+            
+            if not user:
+                flash('Invalid email or password.', 'error')
+                return render_template('login.html')
+            
+            if not check_password_hash(user['password'], password):
+                flash('Invalid email or password.', 'error')
+                return render_template('login.html')
+            
+            if not user['email_verified']:
+                cursor.execute("SELECT verification_code FROM users WHERE id = %s", (user['id'],))
+                verification_info = cursor.fetchone()
+                
+                if verification_info and verification_info['verification_code']:
+                    new_code = generate_verification_code()
+                    cursor.execute(
+                        "UPDATE users SET verification_code = %s WHERE id = %s",
+                        (new_code, user['id'])
+                    )
                     conn.commit()
                     
-                    # Verify the update worked
-                    cursor.execute("SELECT language FROM users WHERE name=?", 
-                                  (session['username'],))
-                    result = cursor.fetchone()
-                    if result and result[0] == language:
-                        print(f"Successfully updated language to {language} in database")
-                    else:
-                        print(f"Failed to update language in database")
+                    send_verification_email(user['email'], new_code)
+                    flash('Your email is not verified. A new verification email has been sent.', 'warning')
+                else:
+                    new_code = generate_verification_code()
+                    cursor.execute(
+                        "UPDATE users SET verification_code = %s WHERE id = %s",
+                        (new_code, user['id'])
+                    )
+                    conn.commit()
+                    
+                    send_verification_email(user['email'], new_code)
+                    flash('Your email is not verified. A verification email has been sent.', 'warning')
+                
+                return render_template('login.html')
+            
+            session['user_id'] = user['id']
+            session['username'] = user['username']
+            session['authenticated'] = True
+            
+            if user['language']:
+                session['language'] = user['language']
+            else:
+                session['language'] = 'en'
+            
+            flash(f'Welcome back, {user["username"]}!', 'success')
+            return redirect(url_for('dashboard'))
+        except Exception as e:
+            logger.error(f"Login error: {str(e)}")
+            flash('An error occurred during login. Please try again.', 'error')
+        finally:
+            if conn:
+                cursor.close()
+                release_db_connection(conn)
+    
+    return render_template('login.html')
+
+@app.route('/forgot-password', methods=['GET', 'POST'])
+def forgot_password() -> Any:
+    """Handle password reset request."""
+    if not session.get('authenticated'):
+        return redirect(url_for('password_gate'))
+        
+    if request.method == 'POST':
+        email = request.form.get('email')
+        
+        if not email:
+            flash('Email is required.', 'error')
+            return render_template('forgot_password.html')
+        
+        conn = None
+        try:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            
+            cursor.execute("SELECT id, email FROM users WHERE email = %s", (email,))
+            user = cursor.fetchone()
+            
+            if user:
+                reset_code = generate_verification_code()
+                
+                cursor.execute(
+                    "UPDATE users SET verification_code = %s WHERE id = %s",
+                    (reset_code, user[0])
+                )
+                conn.commit()
+                
+                reset_link = url_for('reset_password', code=reset_code, _external=True)
+                
+                msg = Message('Reset Your Password - 51Talk AI Learning', recipients=[email])
+                msg.body = f'''Click the link below to reset your password:
+{reset_link}
+
+If you didn't request a password reset, please ignore this email.
+'''
+                msg.html = f'''
+<h1>Password Reset</h1>
+<p>You've requested to reset your password for your 51Talk AI Learning account.</p>
+<p>Click the link below to reset your password:</p>
+<p><a href="{reset_link}" style="background-color: #4CAF50; color: white; padding: 10px 15px; text-align: center; text-decoration: none; display: inline-block; border-radius: 5px;">Reset Password</a></p>
+<p>If you didn't request a password reset, please ignore this email.</p>
+<p>Best regards,<br>51Talk AI Learning Team</p>
+'''
+                mail.send(msg)
+                logger.info(f"Password reset email sent to {email}")
+            
+            flash('If an account with that email exists, a password reset link has been sent.', 'success')
+            return redirect(url_for('login'))
+        except Exception as e:
+            if conn:
+                conn.rollback()
+            logger.error(f"Password reset error: {str(e)}")
+            flash('An error occurred. Please try again later.', 'error')
+        finally:
+            if conn:
+                cursor.close()
+                release_db_connection(conn)
+    
+    return render_template('forgot_password.html')
+
+@app.route('/reset-password/<code>', methods=['GET', 'POST'])
+def reset_password(code: str) -> Any:
+    """Handle password reset functionality."""
+    if not session.get('authenticated'):
+        return redirect(url_for('password_gate'))
+        
+    if request.method == 'POST':
+        password = request.form.get('password')
+        confirm_password = request.form.get('confirm_password')
+        
+        if not password or not confirm_password:
+            flash('All fields are required.', 'error')
+            return render_template('reset_password.html', code=code)
+        
+        if password != confirm_password:
+            flash('Passwords do not match.', 'error')
+            return render_template('reset_password.html', code=code)
+        
+        if len(password) < 8:
+            flash('Password must be at least 8 characters long.', 'error')
+            return render_template('reset_password.html', code=code)
+        
+        conn = None
+        try:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            
+            cursor.execute("SELECT id FROM users WHERE verification_code = %s", (code,))
+            user = cursor.fetchone()
+            
+            if user:
+                hashed_password = generate_password_hash(password)
+                cursor.execute(
+                    "UPDATE users SET password = %s, verification_code = NULL WHERE id = %s",
+                    (hashed_password, user[0])
+                )
+                conn.commit()
+                
+                flash('Your password has been updated successfully.', 'success')
+                return redirect(url_for('login'))
+            else:
+                flash('Invalid or expired reset link.', 'error')
+                return redirect(url_for('login'))
+        except Exception as e:
+            if conn:
+                conn.rollback()
+            logger.error(f"Password reset error: {str(e)}")
+            flash('An error occurred. Please try again later.', 'error')
+        finally:
+            if conn:
+                cursor.close()
+                release_db_connection(conn)
+    
+    conn = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute("SELECT id FROM users WHERE verification_code = %s", (code,))
+        user = cursor.fetchone()
+        
+        if not user:
+            flash('Invalid or expired reset link.', 'error')
+            return redirect(url_for('login'))
+    except Exception as e:
+        logger.error(f"Password reset validation error: {str(e)}")
+        flash('An error occurred. Please try again later.', 'error')
+        return redirect(url_for('login'))
+    finally:
+        if conn:
+            cursor.close()
+            release_db_connection(conn)
+    
+    return render_template('reset_password.html', code=code)
+
+# ==============================================
+# USER DASHBOARD & LEARNING ROUTES
+# ==============================================
+
+@app.route('/dashboard')
+@login_required
+def dashboard() -> Any:
+    """Display user dashboard with progress and team information."""
+    if not session.get('authenticated'):
+        return redirect(url_for('password_gate'))
+    
+    username = session['username']
+    user_id = session['user_id']
+    current_language = session.get('language', 'en')
+    
+    conn = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        
+        cursor.execute("SELECT COUNT(DISTINCT unit_number) FROM progress WHERE user_id=%s AND completed=1", (user_id,))
+        completed_units = cursor.fetchone()['count'] or 0
+        
+        cursor.execute("""
+            SELECT t.id, t.name, t.camp, u.username AS team_lead_name 
+            FROM teams t
+            JOIN team_members tm ON t.id = tm.team_id
+            JOIN users u ON t.team_lead_id = u.id
+            WHERE tm.user_id = %s
+        """, (user_id,))
+        user_team = cursor.fetchone()
+        
+        cursor.execute("""
+            SELECT t.name, ts.score, u.username AS team_lead_name
+            FROM teams t
+            JOIN team_scores ts ON t.id = ts.team_id
+            JOIN users u ON t.team_lead_id = u.id
+            WHERE t.camp = 'Middle East'
+            ORDER BY ts.score DESC
+            LIMIT 3
+        """)
+        top_teams_me = cursor.fetchall()
+        
+        cursor.execute("""
+            SELECT t.name, ts.score, u.username AS team_lead_name
+            FROM teams t
+            JOIN team_scores ts ON t.id = ts.team_id
+            JOIN users u ON t.team_lead_id = u.id
+            WHERE t.camp = 'Chinese'
+            ORDER BY ts.score DESC
+            LIMIT 3
+        """)
+        top_teams_cn = cursor.fetchall()
+        
+        cursor.close()
+    except Exception as e:
+        logger.error(f"Dashboard error: {str(e)}")
+        completed_units = 0
+        user_team = None
+        top_teams_me = []
+        top_teams_cn = []
+    finally:
+        if conn:
+            release_db_connection(conn)
+    
+    return render_template('dashboard.html', 
+                         username=username, 
+                         completed_units=completed_units,
+                         current_language=current_language,
+                         user_team=user_team,
+                         top_teams_me=top_teams_me,
+                         top_teams_cn=top_teams_cn)
+
+@app.route('/set_language/<language>')
+def set_language(language: str) -> Any:
+    """Change the user interface language."""
+    if language in LANGUAGES:
+        session.pop('language', None)
+        session['language'] = language
+        
+        if 'user_id' in session:
+            conn = None
+            try:
+                conn = get_db_connection()
+                cursor = conn.cursor()
+                cursor.execute("UPDATE users SET language=%s WHERE id=%s", (language, session['user_id']))
+                conn.commit()
+                logger.info(f"Language updated to {language} for user {session['user_id']}")
             except Exception as e:
-                print(f"Error updating language in database: {str(e)}")
+                logger.error(f"Error updating language in database: {str(e)}")
+            finally:
+                if conn:
+                    cursor.close()
+                    release_db_connection(conn)
         
-        # Force the session to be saved
         session.modified = True
-        
-        # Add debug info
-        print(f"Language changed to {language} in session")
-        print(f"Current session: {session}")
-        
-        # Flash a message to confirm
         flash(f"Language changed to {LANGUAGES[language]}", "success")
     
-    # Use a cache-busting parameter to prevent browser caching
     return redirect(request.referrer + f"?lang_change={language}" if request.referrer else url_for('dashboard'))
 
 @app.route('/debug_translation')
-def debug_translation():
+def debug_translation() -> Any:
+    """Debug endpoint for translation system."""
     current_lang = session.get('language', 'en')
     username = session.get('username', 'not logged in')
+    user_id = session.get('user_id', None)
     
-    # Check if user exists and get stored language
     db_lang = 'unknown'
-    if username != 'not logged in':
+    if user_id:
         try:
-            with sqlite3.connect(DB_NAME) as conn:
-                cursor = conn.cursor()
-                cursor.execute("SELECT language FROM users WHERE name=?", (username,))
-                result = cursor.fetchone()
-                if result:
-                    db_lang = result[0]
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            cursor.execute("SELECT language FROM users WHERE id=%s", (user_id,))
+            result = cursor.fetchone()
+            cursor.close()
+            release_db_connection(conn)
+            if result:
+                db_lang = result[0]
         except Exception as e:
             db_lang = f"Error: {str(e)}"
     
-    # Test translations for a few keys
     test_keys = ['welcome', 'login', 'register', 'dashboard', 'logout', 'settings']
     translations = {}
     for key in test_keys:
         translations[key] = get_text(key)
     
-    # Get all available translations for the current language
     all_translations = {}
     for key in TRANSLATIONS.get(current_lang, {}):
         all_translations[key] = TRANSLATIONS[current_lang][key]
     
     return jsonify({
         'username': username,
+        'user_id': user_id,
         'session_language': current_lang,
         'db_language': db_lang,
         'sample_translations': translations,
@@ -875,410 +1298,1077 @@ def debug_translation():
         'all_languages': LANGUAGES
     })
 
+import json
+import os
+from flask import (
+    request, session, redirect, url_for, flash, render_template
+)
+from werkzeug.utils import secure_filename
+
 @app.route('/unit/<int:unit_id>', methods=['GET', 'POST'])
-def unit(unit_id):
+@login_required
+def unit(unit_id: int) -> any:
+    """Display a learning unit and handle project submissions."""
     if not session.get('authenticated'):
         return redirect(url_for('password_gate'))
-    
-    if 'username' not in session:
-        return redirect(url_for('home'))
-    
+
     username = session['username']
-    user_id = get_user_id(username)
-    
-    with sqlite3.connect(DB_NAME) as conn:
+    user_id = session['user_id']
+
+    conn = None
+    try:
+        conn = get_db_connection()
         cursor = conn.cursor()
-        
+        # Handle POST: Mark unit complete
         if request.method == 'POST' and 'complete' in request.form:
-            # First check if entry exists
-            cursor.execute("SELECT id FROM progress WHERE user_id=? AND unit_number=?", (user_id, unit_id))
+            cursor.execute(
+                "SELECT id FROM progress WHERE user_id=%s AND unit_number=%s",
+                (user_id, unit_id)
+            )
             if cursor.fetchone():
-                cursor.execute("UPDATE progress SET completed=1 WHERE user_id=? AND unit_number=?", (user_id, unit_id))
+                cursor.execute(
+                    "UPDATE progress SET completed=1 WHERE user_id=%s AND unit_number=%s",
+                    (user_id, unit_id)
+                )
             else:
-                cursor.execute("INSERT INTO progress (user_id, unit_number, completed) VALUES (?, ?, 1)", (user_id, unit_id))
-            
+                cursor.execute(
+                    "INSERT INTO progress (user_id, unit_number, completed) VALUES (%s, %s, 1)",
+                    (user_id, unit_id)
+                )
             conn.commit()
             return redirect(url_for('dashboard'))
-        
+
+        # Handle POST: Project submission
         if request.method == 'POST' and 'submit_project' in request.form:
             file = request.files.get('project_file')
             if file and allowed_file(file.filename):
-                # Generate a unique filename to avoid conflicts
                 original_filename = secure_filename(file.filename)
                 filename = f"{unit_id}_{user_id}_{original_filename}"
                 file_path = os.path.join(UPLOAD_FOLDER, filename)
-                
-                # Save the file
                 file.save(file_path)
-                
-                # Store only the filename in the database, not the full path
-                cursor.execute("""
-                    INSERT INTO submissions (user_id, unit_id, file_path)
-                    VALUES (?, ?, ?)
-                """, (user_id, unit_id, filename))
-                
-                # Check if progress record exists
-                cursor.execute("SELECT id FROM progress WHERE user_id=? AND unit_number=?", (user_id, unit_id))
+
+                cursor.execute(
+                    "INSERT INTO submissions (user_id, unit_id, file_path) VALUES (%s, %s, %s)",
+                    (user_id, unit_id, filename)
+                )
+
+                cursor.execute(
+                    "SELECT id FROM progress WHERE user_id=%s AND unit_number=%s",
+                    (user_id, unit_id)
+                )
                 if cursor.fetchone():
-                    cursor.execute("""
-                        UPDATE progress 
-                        SET project_completed = 1 
-                        WHERE user_id = ? AND unit_number = ?
-                    """, (user_id, unit_id))
+                    cursor.execute(
+                        "UPDATE progress SET project_completed = 1 WHERE user_id = %s AND unit_number = %s",
+                        (user_id, unit_id)
+                    )
                 else:
-                    cursor.execute("""
-                        INSERT INTO progress (user_id, unit_number, project_completed)
-                        VALUES (?, ?, 1)
-                    """, (user_id, unit_id))
-                
+                    cursor.execute(
+                        "INSERT INTO progress (user_id, unit_number, project_completed) VALUES (%s, %s, 1)",
+                        (user_id, unit_id)
+                    )
+
                 conn.commit()
                 flash('Project submitted successfully!', 'success')
                 return redirect(url_for('unit', unit_id=unit_id))
-            
-        cursor.execute("SELECT title, description, resources FROM projects WHERE unit_id=?", (unit_id,))
+
+        # Fetch project info
+        cursor.execute(
+            "SELECT title, description, resources FROM projects WHERE unit_id=%s",
+            (unit_id,)
+        )
         project = cursor.fetchone()
-        
-        cursor.execute("SELECT title, content, file_path FROM materials WHERE unit_id=?", (unit_id,))
+
+        # Fetch materials
+        cursor.execute(
+            "SELECT title, content, file_path FROM materials WHERE unit_id=%s",
+            (unit_id,)
+        )
         materials = cursor.fetchall()
-        
-        cursor.execute("SELECT title, youtube_url, description FROM videos WHERE unit_id=?", (unit_id,))
+
+        # Fetch videos
+        cursor.execute(
+            "SELECT title, youtube_url, description FROM videos WHERE unit_id=%s",
+            (unit_id,)
+        )
         videos = cursor.fetchall()
-        
-        # Get vocabulary words for this unit
-        cursor.execute("""
-            SELECT id, word, definition, example, section 
-            FROM words 
-            WHERE unit_id=? 
+
+        # Fetch vocabulary words with all fields
+        columns = [
+            'id', 'word', 'definition', 'example', 'section',
+            'one_sentence_version', 'daily_definition', 'life_metaphor',
+            'visual_explanation', 'core_elements', 'scenario_theater',
+            'misunderstandings', 'reality_connection', 'thinking_bubble',
+            'smiling_conclusion'
+        ]
+
+        cursor.execute(f"""
+            SELECT id, word, definition, example, section,
+                   one_sentence_version, daily_definition, life_metaphor,
+                   visual_explanation, core_elements, scenario_theater,
+                   misunderstandings, reality_connection, thinking_bubble,
+                   smiling_conclusion
+            FROM words
+            WHERE unit_id = %s
             ORDER BY section, id
         """, (unit_id,))
-        words = cursor.fetchall()
-        
+
+        rows = cursor.fetchall()
+        words = []
+        for row in rows:
+            w = dict(zip(columns, row))
+            
+            # Parse core_elements safely
+            if w.get('core_elements'):
+                try:
+                    core_raw = json.loads(w['core_elements'])
+                    # Ensure it's a list of dictionaries
+                    if isinstance(core_raw, list):
+                        # Check if it's already in the correct format
+                        if core_raw and isinstance(core_raw[0], dict):
+                            w['core_elements'] = core_raw
+                        else:
+                            # Handle old format where it might be a list of strings
+                            parsed = []
+                            for item in core_raw:
+                                if isinstance(item, str) and '-' in item:
+                                    parts = item.split('-', 1)
+                                    if len(parts) == 2:
+                                        parsed.append({
+                                            "core_element": parts[0].strip(),
+                                            "everyday_object": parts[1].strip()
+                                        })
+                            w['core_elements'] = parsed
+                    else:
+                        w['core_elements'] = []
+                except (json.JSONDecodeError, TypeError, IndexError) as e:
+                    logger.warning(f"Error parsing core_elements for word {w.get('id', 'unknown')}: {e}")
+                    w['core_elements'] = []
+            else:
+                w['core_elements'] = []
+            
+            words.append(w)
+
+        # Get user progress
         progress = get_progress(user_id, unit_id)
         project_completed = progress[2] if progress else 0
         quiz_attempted = has_attempted_quiz(user_id, unit_id)
-        
-        # Get the quiz_id for this unit (added to fix the URL building error)
+
+        # Get quiz attempt info if quiz was attempted
+        quiz_attempt_info = None
+        if quiz_attempted:
+            quiz_attempt_info = get_quiz_attempt_info(user_id, unit_id)
+
         quiz_id = None
-        cursor.execute("SELECT id FROM quizzes WHERE unit_id=? LIMIT 1", (unit_id,))
+        cursor.execute(
+            "SELECT id FROM quizzes WHERE unit_id=%s LIMIT 1",
+            (unit_id,)
+        )
         quiz_result = cursor.fetchone()
         if quiz_result:
             quiz_id = quiz_result[0]
-    
-    return render_template('unit.html',
-                         username=username,
-                         unit_id=unit_id,
-                         project=project,
-                         materials=materials,
-                         videos=videos,
-                         words=words,
-                         project_completed=project_completed,
-                         quiz_attempted=quiz_attempted,
-                         quiz_id=quiz_id)  # Add quiz_id to template context
+
+        cursor.close()
+
+    except Exception as e:
+        logger.error(f"Unit page error: {str(e)}")
+        flash(f"An error occurred: {str(e)}", "error")
+        project = None
+        materials = []
+        videos = []
+        words = []
+        project_completed = 0
+        quiz_attempted = False
+        quiz_attempt_info = None
+        quiz_id = None
+    finally:
+        if conn:
+            release_db_connection(conn)
+
+    return render_template(
+        'unit.html',
+        username=username,
+        unit_id=unit_id,
+        project=project,
+        materials=materials,
+        videos=videos,
+        words=words,
+        project_completed=project_completed,
+        quiz_attempted=quiz_attempted,
+        quiz_attempt_info=quiz_attempt_info,  # Add this line
+        quiz_id=quiz_id
+    )
 
 @app.route('/quiz/<int:unit_id>', methods=['GET', 'POST'])
-def quiz(unit_id):
+@login_required
+def quiz(unit_id: int) -> Any:
+    """Display and process quizzes for a unit - can only be taken once."""
     if not session.get('authenticated'):
         return redirect(url_for('password_gate'))
-    
-    if 'username' not in session:
-        return redirect(url_for('home'))
-    
+
     username = session['username']
-    user_id = get_user_id(username)
-    
-    # Check if previous units are completed
+    user_id = session['user_id']
+
+    # Check prerequisite
     if unit_id > 1:
-        with sqlite3.connect(DB_NAME) as conn:
+        conn = None
+        try:
+            conn = get_db_connection()
             cursor = conn.cursor()
-            cursor.execute("SELECT completed FROM progress WHERE user_id=? AND unit_number=?", 
-                          (user_id, unit_id-1))
+            cursor.execute("SELECT completed FROM progress WHERE user_id=%s AND unit_number=%s", (user_id, unit_id - 1))
             previous_unit = cursor.fetchone()
-            
+            cursor.close()
+
             if not previous_unit or previous_unit[0] != 1:
                 flash('You need to complete the previous unit first!', 'warning')
-                return redirect(url_for('unit', unit_id=unit_id-1))
-    
-    # Get motivational messages
-    motivational_messages = [
-        "You've got this! Every question is an opportunity to learn.",
-        "Believe in yourself - you're capable of amazing things!",
-        "Mistakes are proof you're trying. Keep going!",
-        "Your effort today is your success tomorrow.",
-        "Learning is a journey, not a destination. Enjoy the process!"
-    ]
-    
-    motivation = random.choice(motivational_messages)
-    
-    with sqlite3.connect(DB_NAME) as conn:
+                return redirect(url_for('unit', unit_id=unit_id - 1))
+        except Exception as e:
+            logger.error(f"Quiz prerequisite check error: {str(e)}")
+            flash("An error occurred while checking prerequisites.", "error")
+        finally:
+            if conn:
+                release_db_connection(conn)
+
+    conn = None
+    try:
+        conn = get_db_connection()
         cursor = conn.cursor()
-        
-        # Remove the quiz attempt check to allow multiple attempts
-        
-        if request.method == 'POST':
-            try:
-                cursor.execute("SELECT id, question, options, correct_answer FROM quizzes WHERE unit_id=?", (unit_id,))
-                questions = cursor.fetchall()
-                
-                if not questions:
-                    flash('No questions found for this quiz', 'error')
-                    return redirect(url_for('unit', unit_id=unit_id))
-                
-                score = 0
-                results = []
-                for q in questions:
-                    try:
-                        q_id = q[0]
-                        user_answer = request.form.get(f'q{q_id}')
-                        correct = False
-                        
-                        if user_answer and int(user_answer) == q[3]:
-                            score += 1
-                            correct = True
-                        
-                        cursor.execute("SELECT explanation FROM quizzes WHERE id=?", (q_id,))
-                        explanation = cursor.fetchone()[0]
-                        
-                        results.append({
-                            'question': q[1],
-                            'options': json.loads(q[2]),
-                            'correct_index': q[3],
-                            'user_answer': int(user_answer) if user_answer else None,
-                            'explanation': explanation,
-                            'correct': correct
-                        })
-                    
-                    except Exception as e:
-                        flash(f'Error processing question {q_id}: {str(e)}', 'error')
-                        continue
-                
-                # Updated passing score to 3 out of 5
-                passed = score >= 3
-                
-                if passed:
-                    overall_result = f"Congratulations! You passed with {score}/{len(questions)} correct answers!"
-                    success_messages = [
-                        "Awesome job! You're making excellent progress!",
-                        "You're crushing it! Keep up the fantastic work!",
-                        "Success! Your hard work is paying off!",
-                        "Brilliant! You're mastering this material!",
-                        "Stellar performance! You should be proud!"
-                    ]
-                    motivation = random.choice(success_messages)
-                else:
-                    overall_result = f"You scored {score}/{len(questions)}. You need at least 3 correct answers to pass. Try again!"
-                    retry_messages = [
-                        "Don't worry, learning takes time. Let's try again!",
-                        "So close! Review the feedback and give it another shot.",
-                        "Every attempt brings you closer to mastery!",
-                        "Keep going! Persistence is the key to success.",
-                        "You've got this! Take what you've learned and try again."
-                    ]
-                    motivation = random.choice(retry_messages)
-                
-                # Only update progress if passed
-                if passed:
-                    # Check if progress record exists
-                    cursor.execute("SELECT id FROM progress WHERE user_id=? AND unit_number=?", (user_id, unit_id))
-                    if cursor.fetchone():
-                        cursor.execute("""
-                            UPDATE progress SET quiz_score=?, completed=1
-                            WHERE user_id=? AND unit_number=?
-                        """, (score, user_id, unit_id))
-                    else:
-                        cursor.execute("""
-                            INSERT INTO progress (user_id, unit_number, quiz_score, completed) 
-                            VALUES (?, ?, ?, 1)
-                        """, (user_id, unit_id, score))
-                
-                # Always record the attempt
-                cursor.execute("INSERT INTO quiz_attempts (user_id, unit_id, score) VALUES (?, ?, ?)", 
-                             (user_id, unit_id, score))
+
+        # Get the user's latest quiz attempt for this unit
+        cursor.execute("""
+            SELECT id, score, attempted_at, passed
+            FROM quiz_attempts
+            WHERE user_id = %s AND unit_id = %s
+            ORDER BY attempted_at DESC
+            LIMIT 1
+        """, (user_id, unit_id))
+        attempt = cursor.fetchone()
+
+        if attempt and attempt[1] is not None:
+            # Review mode
+            attempt_id, score, attempted_at, passed = attempt
+
+            # Fix passed status if needed
+            cursor.execute("SELECT COUNT(*) FROM quizzes WHERE unit_id = %s", (unit_id,))
+            total_questions = cursor.fetchone()[0]
+            min_passing = max(3, int(total_questions * 0.6))
+            should_have_passed = score >= min_passing
+
+            if should_have_passed != passed:
+                logger.info(f"Fixing passed status: score={score}, total={total_questions}, should_pass={should_have_passed}")
+                cursor.execute("UPDATE quiz_attempts SET passed = %s WHERE id = %s", (should_have_passed, attempt_id))
                 conn.commit()
+                passed = should_have_passed
+
+            # --- NEW FETCH QUESTIONS + RESPONSES with correction logic ---
+            cursor.execute("""
+                SELECT q.id, q.question, q.options, q.correct_answer, q.explanation,
+                       qr.user_answer, qr.is_correct
+                FROM quizzes q
+                LEFT JOIN quiz_responses qr ON q.id = qr.question_id AND qr.attempt_id = %s
+                WHERE q.unit_id = %s 
+                ORDER BY q.id
+            """, (attempt_id, unit_id))
+            question_data = cursor.fetchall()
+
+            if not question_data:
+                flash('No questions found for this quiz', 'error')
+                return redirect(url_for('unit', unit_id=unit_id))
+
+            review_results = []
+            for q_data in question_data:
+                q_id, question_text, options_json, correct_answer, explanation, user_answer, is_correct = q_data
                 
-                return render_template('quiz_result.html',
-                                    username=username,
-                                    unit_id=unit_id,
-                                    score=score,
-                                    total=len(questions),
-                                    passed=passed,
-                                    results=results,
-                                    overall_result=overall_result,
-                                    motivation=motivation)
-                
-            except Exception as e:
-                flash(f'Error processing quiz: {str(e)}', 'error')
-                return redirect(url_for('quiz', unit_id=unit_id))
-        
-        else:
-            cursor.execute("SELECT id, question, options FROM quizzes WHERE unit_id=?", (unit_id,))
+                try:
+                    options = json.loads(options_json)
+                except json.JSONDecodeError:
+                    options = []
+
+                # Calculate correctness manually in case DB is inconsistent
+                calculated_correct = False
+                if user_answer is not None and user_answer == correct_answer:
+                    calculated_correct = True
+
+                final_correct = calculated_correct if is_correct is None else is_correct
+
+                if is_correct is not None and is_correct != calculated_correct:
+                    logger.warning(
+                        f"Database inconsistency: question {q_id}, "
+                        f"user_answer={user_answer}, correct_answer={correct_answer}, "
+                        f"db_correct={is_correct}, calculated={calculated_correct}"
+                    )
+                    final_correct = calculated_correct
+
+                review_results.append({
+                    'question': question_text,
+                    'options': options,
+                    'correct_index': correct_answer,
+                    'user_answer': user_answer,
+                    'explanation': explanation or "No explanation available",
+                    'correct': final_correct
+                })
+
+            for i, result in enumerate(review_results):
+                logger.info(f"Question {i+1}: user_answer={result['user_answer']}, correct_index={result['correct_index']}, correct={result['correct']}")
+
+            overall_result = f"You passed this quiz with {score}/{total_questions} correct answers!" if passed else f"You scored {score}/{total_questions}. You needed at least {min_passing} to pass."
+            motivation = "Great job! You've successfully completed this unit." if passed else "You can review the material and continue learning. Contact your instructor if you need help."
+
+            return render_template('quiz_review.html',
+                                   username=username,
+                                   unit_id=unit_id,
+                                   score=score,
+                                   total=total_questions,
+                                   passed=passed,
+                                   results=review_results,
+                                   overall_result=overall_result,
+                                   motivation=motivation,
+                                   attempted_at=attempted_at,
+                                   is_review=True)
+
+        # Quiz submission (POST)
+        if request.method == 'POST':
+            cursor.execute("SELECT id, question, options, correct_answer FROM quizzes WHERE unit_id=%s", (unit_id,))
             questions = cursor.fetchall()
-            
+
             if not questions:
                 flash('No questions found for this quiz', 'error')
                 return redirect(url_for('unit', unit_id=unit_id))
-            
-            question_list = []
-            for row in questions:
-                try:
-                    options = json.loads(row[2])
-                    question_list.append({
-                        'id': row[0],
-                        'question': row[1],
-                        'options': options
-                    })
-                except json.JSONDecodeError:
-                    flash('Error loading quiz options', 'error')
-                    continue
-            
-            return render_template('quiz.html',
-                                username=username,
-                                unit_id=unit_id,
-                                questions=question_list,
-                                motivation=motivation)
 
-@app.route('/ai_assistant', methods=['GET', 'POST'])
-def ai_assistant():
-    if not session.get('authenticated'):
-        return redirect(url_for('password_gate'))
-    
-    if 'username' not in session:
-        return redirect(url_for('home'))
-    
-    username = session['username']
-    
-    if request.method == 'POST':
-        question = request.form.get('question')
-        if question:
-            try:
-                if llm is None:
-                    flash("AI assistant is not available at this time. Please try again later.", 'error')
-                    return redirect(url_for('ai_assistant'))
-                    
-                result = llm.invoke(question)
-                answer = result.content
-                
-                user_id = get_user_id(username)
-                with sqlite3.connect(DB_NAME) as conn:
-                    conn.execute("""
-                        INSERT INTO qa_history (user_id, question, answer)
-                        VALUES (?, ?, ?)
-                    """, (user_id, question, answer))
-                    conn.commit()
-                
-                return render_template('ai_assistant.html',
-                                    show_answer=True,
-                                    question=question,
-                                    answer=answer)
-            except Exception as e:
-                flash(f"Error getting response: {str(e)}", 'danger')
-                return redirect(url_for('ai_assistant'))
-    
-    return render_template('ai_assistant.html', show_answer=False)
+            score = 0
+            results = []
 
-@app.route('/ask_ai', methods=['POST'])
-def ask_ai():
-    if not session.get('authenticated'):
-        return jsonify({'error': 'Not authenticated'}), 401
-    
-    data = request.get_json()
-    question = data.get('question')
-    
-    if not question:
-        return jsonify({'error': 'No question provided'}), 400
-    
-    try:
-        if llm is None:
-            return jsonify({'error': 'AI assistant not available'}), 503
-            
-        result = llm.invoke(question)
-        answer = result.content
-        
-        user_id = get_user_id(session['username'])
-        with sqlite3.connect(DB_NAME) as conn:
-            conn.execute("""
-                INSERT INTO qa_history (user_id, question, answer)
-                VALUES (?, ?, ?)
-            """, (user_id, question, answer))
+            cursor.execute("""
+                INSERT INTO quiz_attempts (user_id, unit_id, score, passed) 
+                VALUES (%s, %s, %s, %s) 
+                RETURNING id
+            """, (user_id, unit_id, 0, False))
+            attempt_id = cursor.fetchone()[0]
+
+            for q in questions:
+                q_id = q[0]
+                user_answer = request.form.get(f'q{q_id}')
+                correct = False
+                if user_answer and int(user_answer) == q[3]:
+                    score += 1
+                    correct = True
+                cursor.execute("""
+                    INSERT INTO quiz_responses (attempt_id, question_id, user_answer, is_correct)
+                    VALUES (%s, %s, %s, %s)
+                """, (attempt_id, q_id, int(user_answer) if user_answer else None, correct))
+
+                cursor.execute("SELECT explanation FROM quizzes WHERE id=%s", (q_id,))
+                explanation = cursor.fetchone()[0]
+
+                results.append({
+                    'question': q[1],
+                    'options': json.loads(q[2]),
+                    'correct_index': q[3],
+                    'user_answer': int(user_answer) if user_answer else None,
+                    'explanation': explanation,
+                    'correct': correct
+                })
+
+            total_questions = len(questions)
+            min_passing = max(3, int(total_questions * 0.6))
+            passed = score >= min_passing
+
+            cursor.execute("""
+                UPDATE quiz_attempts 
+                SET score = %s, passed = %s 
+                WHERE id = %s
+            """, (score, passed, attempt_id))
+
+            if passed:
+                overall_result = f"Congratulations! You passed with {score}/{total_questions} correct answers!"
+                motivation = random.choice([
+                    "Awesome job! You're making excellent progress!",
+                    "You're crushing it! Keep up the fantastic work!",
+                    "Success! Your hard work is paying off!",
+                    "Brilliant! You're mastering this material!",
+                    "Stellar performance! You should be proud!"
+                ])
+                cursor.execute("SELECT id FROM progress WHERE user_id=%s AND unit_number=%s", (user_id, unit_id))
+                if cursor.fetchone():
+                    cursor.execute("""
+                        UPDATE progress SET quiz_score=%s, completed=1
+                        WHERE user_id=%s AND unit_number=%s
+                    """, (score, user_id, unit_id))
+                else:
+                    cursor.execute("""
+                        INSERT INTO progress (user_id, unit_number, quiz_score, completed) 
+                        VALUES (%s, %s, %s, 1)
+                    """, (user_id, unit_id, score))
+                update_team_score(user_id, score)
+            else:
+                overall_result = f"You scored {score}/{total_questions}. You need at least {min_passing} correct answers to pass."
+                motivation = "You can review the material and contact your instructor for additional help. This quiz can only be taken once."
+
             conn.commit()
-        
-        return jsonify({'answer': answer})
+
+            return render_template('quiz_result.html',
+                                   username=username,
+                                   unit_id=unit_id,
+                                   score=score,
+                                   total=total_questions,
+                                   passed=passed,
+                                   results=results,
+                                   overall_result=overall_result,
+                                   motivation=motivation,
+                                   is_review=False)
+
+        # GET first attempt
+        cursor.execute("SELECT id, question, options FROM quizzes WHERE unit_id=%s", (unit_id,))
+        questions = cursor.fetchall()
+
+        if not questions:
+            flash('No questions found for this quiz', 'error')
+            return redirect(url_for('unit', unit_id=unit_id))
+
+        question_list = []
+        for row in questions:
+            try:
+                options = json.loads(row[2])
+                question_list.append({
+                    'id': row[0],
+                    'question': row[1],
+                    'options': options
+                })
+            except json.JSONDecodeError:
+                flash('Error loading quiz options', 'error')
+                continue
+
+        motivation = random.choice([
+            "You've got this! Every question is an opportunity to learn.",
+            "Believe in yourself - you're capable of amazing things!",
+            "Mistakes are proof you're trying. Keep going!",
+            "Your effort today is your success tomorrow.",
+            "Learning is a journey, not a destination. Enjoy the process!"
+        ])
+
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        logger.error(f"Quiz page error: {str(e)}")
+        flash(f"An error occurred loading the quiz: {str(e)}", "error")
+        return redirect(url_for('unit', unit_id=unit_id))
+    finally:
+        if conn:
+            cursor.close()
+            release_db_connection(conn)
+
+    return render_template('quiz.html',
+                           username=username,
+                           unit_id=unit_id,
+                           questions=question_list,
+                           motivation=motivation,
+                           is_first_attempt=True)
+
 
 @app.route('/feedback', methods=['GET', 'POST'])
-def feedback():
+@login_required
+def feedback() -> Any:
+    """Handle user feedback submission."""
     if not session.get('authenticated'):
         return redirect(url_for('password_gate'))
     
-    if 'username' not in session:
-        return redirect(url_for('home'))
-    
     username = session['username']
-    user_id = get_user_id(username)
+    user_id = session['user_id']
     
     if request.method == 'POST':
         feedback_text = request.form.get('feedback')
         rating = request.form.get('rating')
         
         if feedback_text:
+            conn = None
             try:
-                # Ensure feedback table has correct structure
-                check_and_fix_feedback_table()
-                
-                with sqlite3.connect(DB_NAME) as conn:
-                    conn.execute('''
-                        INSERT INTO feedback (user_id, feedback_text, rating)
-                        VALUES (?, ?, ?)
-                    ''', (user_id, feedback_text, rating))
-                    conn.commit()
+                conn = get_db_connection()
+                cursor = conn.cursor()
+                cursor.execute('''
+                    INSERT INTO feedback (user_id, feedback_text, rating)
+                    VALUES (%s, %s, %s)
+                ''', (user_id, feedback_text, rating))
+                conn.commit()
+                cursor.close()
                 flash('Thank you for your feedback!', 'success')
                 return redirect(url_for('dashboard'))
-            except sqlite3.Error as e:
+            except Exception as e:
+                logger.error(f"Feedback submission error: {str(e)}")
                 flash(f'Error submitting feedback: {str(e)}', 'danger')
+            finally:
+                if conn:
+                    release_db_connection(conn)
     
     return render_template('feedback.html', username=username)
 
-@app.route('/qa_history')
-def qa_history():
+@app.route('/download_material/<path:filename>')
+def download_material(filename: str) -> Any:
+    """Handle material file download with security checks."""
     if not session.get('authenticated'):
         return redirect(url_for('password_gate'))
     
-    if 'username' not in session:
-        return redirect(url_for('home'))
+    if 'user_id' not in session:
+        return redirect(url_for('login'))
+    
+    try:
+        safe_filename = filename.replace('../', '').replace('..\\', '')
+        file_path = os.path.join(UPLOAD_FOLDER, safe_filename)
+        
+        return send_file(file_path, as_attachment=True)
+    except Exception as e:
+        logger.error(f"Error downloading file: {str(e)}")
+        flash(f"Error downloading file: {str(e)}", "error")
+        return redirect(request.referrer or url_for('dashboard'))
+
+# ==============================================
+# AI ASSISTANT ROUTES
+# ==============================================
+
+@app.route('/ai_assistant', methods=['GET', 'POST'])
+@login_required
+def ai_assistant() -> Any:
+    """Simplified AI assistant functionality using forms and page redirects."""
+    if not session.get('authenticated'):
+        return redirect(url_for('password_gate'))
     
     username = session['username']
-    user_id = get_user_id(username)
+    user_id = session['user_id']
     
-    with sqlite3.connect(DB_NAME) as conn:
-        conn.row_factory = sqlite3.Row
-        cursor = conn.cursor()
+    question = request.args.get('question') or (request.form.get('question') if request.method == 'POST' else None)
+    
+    current_question = None
+    current_answer = None
+    current_sources = []
+    is_processing = False
+    
+    history = []
+    conn = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
         cursor.execute("""
             SELECT question, answer, created_at 
             FROM qa_history 
-            WHERE user_id=? 
+            WHERE user_id = %s 
             ORDER BY created_at DESC
+            LIMIT 10
         """, (user_id,))
         history = cursor.fetchall()
+        cursor.close()
+    except Exception as e:
+        logger.error(f"Error fetching history: {str(e)}")
+    finally:
+        if conn:
+            release_db_connection(conn)
+    
+    if question and question.strip():
+        question = question.strip()
+        
+        if len(question) > 1000:
+            flash('Question too long. Please keep it under 1000 characters.', 'error')
+            return redirect(url_for('ai_assistant'))
+        
+        if any(word in question.lower() for word in ['sql', 'delete', 'drop', 'insert', 'update']):
+            flash('Please ask questions about course content only.', 'error')
+            return redirect(url_for('ai_assistant'))
+        
+        current_question = question
+        is_processing = True
+        
+        try:
+            qa_response = ask_question(
+                question, 
+                documents_dir=DOCUMENTS_DIR, 
+                llama_model_path=LLAMA_MODEL_PATH
+            )
+            
+            if qa_response.get("success", False):
+                current_answer = qa_response.get("answer", "I couldn't generate a response.")
+                current_sources = qa_response.get("sources", [])
+            else:
+                current_answer = qa_response.get("answer", "I'm currently unavailable. The system may still be loading course materials.")
+                current_sources = []
+            
+            if not current_answer or current_answer.strip() == "":
+                current_answer = "I couldn't find relevant information to answer your question. Please try rephrasing it or asking about a different topic."
+            
+            try:
+                conn = get_db_connection()
+                cursor = conn.cursor()
+                cursor.execute("""
+                    INSERT INTO qa_history (user_id, question, answer)
+                    VALUES (%s, %s, %s)
+                """, (user_id, question, current_answer))
+                conn.commit()
+                cursor.close()
+                logger.info(f"Saved QA history for user {user_id}")
+            except Exception as db_error:
+                logger.error(f"Error saving QA history: {str(db_error)}")
+            finally:
+                if conn:
+                    release_db_connection(conn)
+            
+            is_processing = False
+            
+        except Exception as e:
+            logger.error(f"AI Assistant error: {str(e)}")
+            current_answer = "I encountered an error while processing your question. Please try again with a simpler question."
+            current_sources = []
+            is_processing = False
+ 
+    return render_template('ai_assistant.html',
+                         username=username,
+                         current_question=current_question,
+                         current_answer=current_answer,
+                         current_sources=current_sources,
+                         is_processing=is_processing,
+                         history=history)
+
+@app.route('/ask_ai', methods=['POST'])
+@login_required
+def ask_ai() -> Any:
+    """Enhanced API endpoint for asking AI assistant questions with Llama integration."""
+    if not session.get('authenticated'):
+        return jsonify({'error': 'Not authenticated'}), 401
+    
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({'error': 'No data provided'}), 400
+        
+        question = data.get('question', '').strip()
+        
+        if not question:
+            return jsonify({'error': 'No question provided'}), 400
+        
+        if len(question) > 1000:
+            return jsonify({'error': 'Question too long. Please keep it under 1000 characters.'}), 400
+        
+        if any(word in question.lower() for word in ['sql', 'delete', 'drop', 'insert', 'update']):
+            return jsonify({'error': 'Please ask questions about course content only.'}), 400
+        
+        document_qa_instance = get_document_qa()
+        
+        if document_qa_instance is None:
+            return jsonify({
+                'error': 'AI assistant not available. Please contact your administrator.',
+                'answer': 'I apologize, but I\'m currently unavailable. The system may still be loading course materials.',
+                'sources': []
+            }), 503
+        
+        try:
+            qa_response = document_qa_instance.answer_question(question)
+            answer = qa_response.get("answer", "I couldn't generate a response.")
+            sources = qa_response.get("sources", [])
+            
+            if not answer or answer.strip() == "":
+                answer = "I couldn't find relevant information to answer your question. Please try rephrasing it or asking about a different topic."
+            
+            model_type = "Llama" if hasattr(document_qa_instance, 'llama_llm') and document_qa_instance.llama_llm else "Rule-based"
+            logger.info(f"AI Question answered successfully using {model_type} for user {session.get('username', 'unknown')}")
+            
+        except Exception as qa_error:
+            logger.error(f"DocumentQA error: {str(qa_error)}")
+            answer = "I encountered an error while processing your question. Please try again with a simpler question."
+            sources = []
+        
+        try:
+            user_id = session['user_id']
+            threading.Thread(
+                target=save_qa_history_async,
+                args=(user_id, question, answer),
+                daemon=True
+            ).start()
+        except Exception as db_error:
+            logger.error(f"Error initiating QA history save: {str(db_error)}")
+        
+        return jsonify({
+            'success': True,
+            'answer': answer,
+            'sources': sources,
+            'question': question
+        })
+        
+    except Exception as e:
+        logger.error(f"Ask AI API error: {str(e)}")
+        return jsonify({
+            'error': 'An unexpected error occurred while processing your question.',
+            'answer': 'I encountered an error while processing your question. Please try again.',
+            'sources': []
+        }), 500
+
+@app.route('/user_qa_history')
+@login_required
+def user_qa_history() -> Any:
+    """Enhanced user endpoint to get their own Q&A history as JSON."""
+    if not session.get('authenticated'):
+        return jsonify({'success': False, 'error': 'Not authenticated'}), 401
+    
+    user_id = session['user_id']
+    page = request.args.get('page', 1, type=int)
+    per_page = request.args.get('per_page', 20, type=int)
+    
+    per_page = min(per_page, 50)
+    
+    conn = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        
+        cursor.execute("""
+            SELECT COUNT(*) as total
+            FROM qa_history 
+            WHERE user_id = %s
+        """, (user_id,))
+        total = cursor.fetchone()['total']
+        
+        offset = (page - 1) * per_page
+        cursor.execute("""
+            SELECT question, answer, created_at 
+            FROM qa_history 
+            WHERE user_id = %s 
+            ORDER BY created_at DESC
+            LIMIT %s OFFSET %s
+        """, (user_id, per_page, offset))
+        history = cursor.fetchall()
+        cursor.close()
+        
+        history_list = []
+        for item in history:
+            answer = item['answer']
+            if len(answer) > 200:
+                answer = answer[:200] + "..."
+            
+            history_list.append({
+                'question': item['question'],
+                'answer': answer,
+                'full_answer': item['answer'],
+                'created_at': item['created_at'].isoformat() if item['created_at'] else None
+            })
+        
+        return jsonify({
+            'success': True,
+            'history': history_list,
+            'pagination': {
+                'page': page,
+                'per_page': per_page,
+                'total': total,
+                'pages': (total + per_page - 1) // per_page
+            }
+        })
+        
+    except Exception as e:
+        logger.error(f"User QA History error: {str(e)}")
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+    finally:
+        if conn:
+            release_db_connection(conn)
+
+@app.route('/qa_history')
+@login_required
+def qa_history_page() -> Any:
+    """Display user's Q&A history in a dedicated page."""
+    if not session.get('authenticated'):
+        return redirect(url_for('password_gate'))
+    
+    username = session['username']
+    user_id = session['user_id']
+    
+    page = request.args.get('page', 1, type=int)
+    per_page = 10
+    
+    conn = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        
+        cursor.execute("""
+            SELECT COUNT(*) as total
+            FROM qa_history 
+            WHERE user_id = %s
+        """, (user_id,))
+        total = cursor.fetchone()['total']
+        
+        offset = (page - 1) * per_page
+        cursor.execute("""
+            SELECT question, answer, created_at 
+            FROM qa_history 
+            WHERE user_id = %s 
+            ORDER BY created_at DESC
+            LIMIT %s OFFSET %s
+        """, (user_id, per_page, offset))
+        history = cursor.fetchall()
+        cursor.close()
+        
+        total_pages = (total + per_page - 1) // per_page
+        has_prev = page > 1
+        has_next = page < total_pages
+        
+    except Exception as e:
+        logger.error(f"QA History page error: {str(e)}")
+        flash(f"An error occurred: {str(e)}", "error")
+        history = []
+        total = 0
+        has_prev = has_next = False
+        total_pages = 0
+    finally:
+        if conn:
+            release_db_connection(conn)
     
     return render_template('qa_history.html', 
                          username=username,
-                         history=history)
+                         history=history,
+                         pagination={
+                             'page': page,
+                             'per_page': per_page,
+                             'total': total,
+                             'total_pages': total_pages,
+                             'has_prev': has_prev,
+                             'has_next': has_next
+                         })
 
+@app.route('/clear_history')
+@login_required
+def clear_history() -> Any:
+    """Clear user's Q&A history."""
+    if not session.get('authenticated'):
+        return redirect(url_for('password_gate'))
+    
+    user_id = session['user_id']
+    
+    conn = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM qa_history WHERE user_id = %s", (user_id,))
+        deleted_count = cursor.rowcount
+        conn.commit()
+        cursor.close()
+        
+        if deleted_count > 0:
+            flash(f'Cleared {deleted_count} items from history', 'success')
+        else:
+            flash('No history items to clear', 'info')
+        
+    except Exception as e:
+        logger.error(f"Clear history error: {str(e)}")
+        flash('Error clearing history', 'error')
+    finally:
+        if conn:
+            release_db_connection(conn)
+    
+    return redirect(url_for('ai_assistant'))
+
+@app.route('/ai_status')
+@login_required
+def ai_status() -> Any:
+    """Get the current status of the AI system using SimpleQA."""
+    if not session.get('authenticated'):
+        return jsonify({'error': 'Not authenticated'}), 401
+    
+    try:
+        status = get_system_status(
+            documents_dir=DOCUMENTS_DIR,
+            llama_model_path=LLAMA_MODEL_PATH
+        )
+        
+        if not status.get("initialized", False):
+            return jsonify({
+                'status': 'not_initialized',
+                'message': 'AI system not initialized',
+                'ready': False,
+                'document_count': status.get("document_count", 0)
+            })
+        
+        if status.get("vector_store_initializing", False):
+            return jsonify({
+                'status': 'initializing',
+                'message': 'Loading course materials...',
+                'ready': False,
+                'document_count': status.get("document_count", 0)
+            })
+        
+        if status.get("vector_store_error"):
+            return jsonify({
+                'status': 'error',
+                'message': f'Initialization error: {status.get("vector_store_error")}',
+                'ready': False,
+                'document_count': status.get("document_count", 0)
+            })
+        
+        if status.get("ready", False):
+            return jsonify({
+                'status': 'ready',
+                'message': f'AI assistant ready ({status.get("document_count", 0)} documents loaded)',
+                'ready': True,
+                'document_count': status.get("document_count", 0),
+                'llama_available': status.get("llama_available", False)
+            })
+        else:
+            return jsonify({
+                'status': 'not_ready',
+                'message': 'AI assistant not ready',
+                'ready': False,
+                'document_count': status.get("document_count", 0)
+            })
+            
+    except Exception as e:
+        logger.error(f"AI status check error: {str(e)}")
+        return jsonify({
+            'status': 'error',
+            'message': 'Error checking AI status',
+            'ready': False,
+            'document_count': 0
+        })
+
+@app.route('/debug_model')
+@admin_required
+def debug_model():
+    """Debug model status"""
+    model_path = os.path.abspath("models/Meta-Llama-3-8B-Instruct-Q4_K_M.gguf")
+    
+    debug_info = {
+        'model_path': model_path,
+        'model_exists': os.path.exists(model_path),
+        'current_dir': os.getcwd(),
+        'documents_dir': DOCUMENTS_DIR,
+        'documents_exist': os.path.exists(DOCUMENTS_DIR),
+        'has_documents': False
+    }
+    
+    # Check for documents
+    if os.path.exists(DOCUMENTS_DIR):
+        files = []
+        for root, _, filenames in os.walk(DOCUMENTS_DIR):
+            for filename in filenames:
+                if filename.lower().endswith(('.pdf', '.pptx', '.ppt', '.txt')):
+                    files.append(filename)
+        debug_info['document_files'] = files
+        debug_info['has_documents'] = len(files) > 0
+    
+    return jsonify(debug_info)
+
+
+
+
+def save_qa_history_async(user_id: int, question: str, answer: str):
+    """Save QA history asynchronously to avoid blocking main thread."""
+    conn = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO qa_history (user_id, question, answer)
+            VALUES (%s, %s, %s)
+        """, (user_id, question, answer))
+        conn.commit()
+        cursor.close()
+        logger.debug(f"QA history saved successfully for user {user_id}")
+    except Exception as e:
+        logger.error(f"Error saving QA history async: {str(e)}")
+    finally:
+        if conn:
+            release_db_connection(conn)
+
+
+def initialize_document_qa_system():
+    """Initialize the SimpleQA system when the Flask app starts."""
+    try:
+        documents_dir = DOCUMENTS_DIR
+        
+        if not os.path.exists(documents_dir):
+            logger.warning(f"Documents directory not found: {documents_dir}")
+            logger.info("Creating documents directory...")
+            os.makedirs(documents_dir, exist_ok=True)
+            logger.info(f"Please add your course materials to: {documents_dir}")
+            return
+        
+        # Check if there are any documents
+        supported_files = []
+        for root, dirs, files in os.walk(documents_dir):
+            for file in files:
+                if file.lower().endswith(('.pdf', '.pptx', '.ppt', '.txt')):
+                    supported_files.append(file)
+        
+        if not supported_files:
+            logger.warning(f"No supported documents found in {documents_dir}")
+            logger.info("Supported formats: PDF (.pdf), PowerPoint (.pptx, .ppt), Text (.txt)")
+            return
+        
+        logger.info(f"Found {len(supported_files)} document(s) to process")
+        logger.info("Starting SimpleQA initialization in background...")
+        
+        # Initialize in background thread to avoid blocking app startup
+        def init_in_background():
+            try:
+                qa_system = get_qa_system(
+                    documents_dir=documents_dir,
+                    llama_model_path=LLAMA_MODEL_PATH
+                )
+                if qa_system.is_ready():
+                    logger.info("SimpleQA initialization completed successfully")
+                else:
+                    logger.warning("SimpleQA initialization completed but system not ready")
+            except Exception as e:
+                logger.error(f"Failed to initialize SimpleQA: {str(e)}")
+        
+        init_thread = threading.Thread(target=init_in_background, daemon=True)
+        init_thread.start()
+        
+    except Exception as e:
+        logger.error(f"Error starting SimpleQA initialization: {str(e)}")
+
+
+def cleanup_simple_qa():
+    """Cleanup function for graceful shutdown."""
+    try:
+        from document_qa import get_document_qa
+        document_qa = get_document_qa()
+        if document_qa and hasattr(document_qa, 'vector_store_manager'):
+            logger.info("Cleaning up DocumentQA resources...")
+        logger.info("DocumentQA cleanup completed")
+    except Exception as e:
+        logger.error(f"Error during DocumentQA cleanup: {str(e)}")
+
+# Enhanced error handlers
+@app.errorhandler(500)
+def internal_error(error):
+    """Enhanced error handler for internal server errors."""
+    logger.error(f"Internal server error: {str(error)}")
+    if request.path.startswith('/ask_ai'):
+        return jsonify({
+            'error': 'Internal server error occurred',
+            'answer': 'I encountered an internal error. Please try again.',
+            'sources': []
+        }), 500
+    return render_template('error.html', error="Internal server error"), 500
+
+
+@app.errorhandler(504)
+def timeout_error(error):
+    """Handle timeout errors."""
+    logger.error(f"Request timeout: {str(error)}")
+    if request.path.startswith('/ask_ai'):
+        return jsonify({
+            'error': 'Request timed out',
+            'answer': 'The request took too long to process. Please try a simpler question.',
+            'sources': []
+        }), 504
+    return render_template('error.html', error="Request timeout"), 504
 # ---------- ADMIN ROUTES ----------
 @app.route('/admin', methods=['GET'])
-def admin_redirect():
-    """Redirect to admin login page"""
+def admin_redirect() -> Any:
+    """Redirect to admin login page."""
     return redirect(url_for('admin_login'))
 
+
 @app.route('/admin/login', methods=['GET', 'POST'])
-def admin_login():
+def admin_login() -> Any:
+    """Handle admin user login."""
     # Clear any existing admin sessions
     if request.method == 'GET':
         session.pop('admin', None)
         session.pop('admin_username', None)
-    
-    # Run check to make sure admin table is fixed    
-    check_and_fix_admin_table()
     
     if request.method == 'POST':
         username = request.form.get('username')
@@ -1287,11 +2377,14 @@ def admin_login():
         if not username or not password:
             flash('Username and password are required', 'danger')
             return render_template('admin/login.html')
-            
-        with sqlite3.connect(DB_NAME) as conn:
+        
+        conn = None
+        try:   
+            conn = get_db_connection()
             cursor = conn.cursor()
-            cursor.execute("SELECT id, password FROM admin_users WHERE username=?", (username,))
+            cursor.execute("SELECT id, password FROM admin_users WHERE username=%s", (username,))
             admin = cursor.fetchone()
+            cursor.close()
             
             if admin and admin[1] and check_password_hash(admin[1], password):
                 session['admin'] = True
@@ -1300,60 +2393,94 @@ def admin_login():
                 return redirect(url_for('admin_dashboard'))
             else:
                 flash('Invalid admin credentials', 'danger')
+        except Exception as e:
+            logger.error(f"Admin login error: {str(e)}")
+            flash(f"An error occurred: {str(e)}", "danger")
+        finally:
+            if conn:
+                release_db_connection(conn)
                 
     return render_template('admin/login.html')
 
+
 @app.route('/admin/dashboard')
 @admin_required
-def admin_dashboard():
+def admin_dashboard() -> Any:
+    """Display admin dashboard with statistics."""
     stats = get_admin_stats()
     return render_template('admin/dashboard.html', stats=stats)
 
+
 @app.route('/admin/users')
 @admin_required
-def admin_users():
-    with sqlite3.connect(DB_NAME) as conn:
-        conn.row_factory = sqlite3.Row
-        cursor = conn.cursor()
-        cursor.execute("SELECT id, name, language FROM users ORDER BY name")
+def admin_users() -> Any:
+    """Display and manage users."""
+    conn = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("SELECT id, username, email, language, email_verified FROM users ORDER BY username")
         users = cursor.fetchall()
+        cursor.close()
+    except Exception as e:
+        logger.error(f"Admin users page error: {str(e)}")
+        flash(f"An error occurred: {str(e)}", "danger")
+        users = []
+    finally:
+        if conn:
+            release_db_connection(conn)
     
     return render_template('admin/users.html', users=users)
 
+
 @app.route('/admin/submissions')
 @admin_required
-def admin_submissions():
-    with sqlite3.connect(DB_NAME) as conn:
-        conn.row_factory = sqlite3.Row
-        cursor = conn.cursor()
+def admin_submissions() -> Any:
+    """Display user project submissions."""
+    conn = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
         cursor.execute("""
-            SELECT s.id, u.name as username, s.unit_id, s.file_path, s.submitted_at
+            SELECT s.id, u.username, s.unit_id, s.file_path, s.submitted_at
             FROM submissions s
             JOIN users u ON s.user_id = u.id
             ORDER BY s.submitted_at DESC
         """)
         submissions = cursor.fetchall()
+        cursor.close()
+    except Exception as e:
+        logger.error(f"Admin submissions page error: {str(e)}")
+        flash(f"An error occurred: {str(e)}", "danger")
+        submissions = []
+    finally:
+        if conn:
+            release_db_connection(conn)
     
     return render_template('admin/submissions.html', submissions=submissions)
 
+
 @app.route('/admin/download_submissions')
 @admin_required
-def admin_download_submissions():
+def admin_download_submissions() -> Any:
+    """Download all project submissions as a zip file."""
     # Create a BytesIO object to store the ZIP file
     memory_file = io.BytesIO()
     
     # Create a ZIP file in memory
     with zipfile.ZipFile(memory_file, 'w') as zf:
-        with sqlite3.connect(DB_NAME) as conn:
-            conn.row_factory = sqlite3.Row
-            cursor = conn.cursor()
+        conn = None
+        try:
+            conn = get_db_connection()
+            cursor = conn.cursor(cursor_factory=RealDictCursor)
             cursor.execute("""
-                SELECT s.id, u.name as username, s.unit_id, s.file_path, s.submitted_at
+                SELECT s.id, u.username, s.unit_id, s.file_path, s.submitted_at
                 FROM submissions s
                 JOIN users u ON s.user_id = u.id
                 ORDER BY s.submitted_at DESC
             """)
             submissions = cursor.fetchall()
+            cursor.close()
             
             # Add each submission file to the ZIP
             for submission in submissions:
@@ -1367,6 +2494,12 @@ def admin_download_submissions():
                         # Create a name for the file in the ZIP
                         file_name = f"Unit{submission['unit_id']}_{submission['username']}_{file_path}"
                         zf.write(real_path, file_name)
+        except Exception as e:
+            logger.error(f"Admin download submissions error: {str(e)}")
+            flash(f"An error occurred: {str(e)}", "danger")
+        finally:
+            if conn:
+                release_db_connection(conn)
     
     # Reset the file pointer to the beginning
     memory_file.seek(0)
@@ -1380,80 +2513,197 @@ def admin_download_submissions():
         download_name=f'all_submissions_{timestamp}.zip'
     )
 
+
 @app.route('/admin/update_user_language', methods=['POST'])
 @admin_required
-def admin_update_user_language():
+def admin_update_user_language() -> Any:
+    """Update a user's interface language."""
     user_id = request.form.get('user_id')
     language = request.form.get('language')
     
     if user_id and language in LANGUAGES:
+        conn = None
         try:
-            with sqlite3.connect(DB_NAME) as conn:
-                conn.execute("UPDATE users SET language = ? WHERE id = ?", (language, user_id))
-                conn.commit()
-                flash('User language updated successfully', 'success')
-        except sqlite3.Error as e:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            cursor.execute("UPDATE users SET language = %s WHERE id = %s", (language, user_id))
+            conn.commit()
+            cursor.close()
+            flash('User language updated successfully', 'success')
+        except Exception as e:
+            logger.error(f"Admin update user language error: {str(e)}")
             flash(f'Error updating user language: {str(e)}', 'danger')
+        finally:
+            if conn:
+                release_db_connection(conn)
     else:
         flash('Invalid user or language selection', 'danger')
         
     return redirect(url_for('admin_users'))
 
+
 @app.route('/admin/feedback')
 @admin_required
-def admin_feedback():
-    # Ensure feedback table has correct structure
-    check_and_fix_feedback_table()
-    
-    with sqlite3.connect(DB_NAME) as conn:
-        conn.row_factory = sqlite3.Row
-        cursor = conn.cursor()
-        try:
-            cursor.execute('''
-                SELECT feedback.id, users.name, feedback.feedback_text, 
-                       feedback.rating, feedback.created_at 
-                FROM feedback
-                JOIN users ON feedback.user_id = users.id
-                ORDER BY feedback.created_at DESC
-            ''')
-            feedback_items = cursor.fetchall()
-        except sqlite3.Error:
-            feedback_items = []
+def admin_feedback() -> Any:
+    """Display user feedback for admin review."""
+    conn = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute('''
+            SELECT feedback.id, users.username, feedback.feedback_text, 
+                   feedback.rating, feedback.created_at 
+            FROM feedback
+            JOIN users ON feedback.user_id = users.id
+            ORDER BY feedback.created_at DESC
+        ''')
+        feedback_items = cursor.fetchall()
+        cursor.close()
+    except Exception as e:
+        logger.error(f"Admin feedback page error: {str(e)}")
+        flash(f"An error occurred: {str(e)}", "danger")
+        feedback_items = []
+    finally:
+        if conn:
+            release_db_connection(conn)
     
     return render_template('admin/feedback.html', feedback=feedback_items)
 
-# Add the admin_add_word route with section support
+
+import json
+import re
+from collections import defaultdict
+
+def parse_core_elements(form_data):
+    """Parse core elements from form data into proper JSON structure"""
+    grouped = defaultdict(dict)
+    pattern = re.compile(r'core_elements\[(\d+)\]\[(\w+)\]')
+    
+    # Debug print
+    print("=== Parsing Core Elements ===")
+    print("Form data keys:", [k for k in form_data.keys() if 'core_element' in k])
+    
+    for key, value in form_data.items():
+        match = pattern.match(key)
+        if match:
+            idx, field = match.groups()
+            if value.strip():  # Only add non-empty values
+                grouped[int(idx)][field] = value.strip()
+                print(f"Found: {key} = {value}")
+    
+    core_elements = []
+    for idx in sorted(grouped.keys()):
+        item = grouped[idx]
+        if 'core_element' in item and 'everyday_object' in item:
+            core_elements.append({
+                'core_element': item['core_element'],
+                'everyday_object': item['everyday_object']
+            })
+    
+    print(f"Parsed core elements: {core_elements}")
+    return core_elements
+
+
+
 @app.route('/admin/add_word', methods=['GET', 'POST'])
 @admin_required
-def admin_add_word():
-    # Ensure words table exists
-    check_and_create_words_table()
-    
+def admin_add_word() -> Any:
+    """Add a detailed AI vocabulary word."""
     if request.method == 'POST':
+        conn = None
         try:
-            unit_id = request.form['unit_id']
-            word = request.form['word']
-            definition = request.form['definition']
-            example = request.form.get('example', '')  # This field is optional
-            section = request.form.get('section', 1)   # Default to section 1 if not provided
+            # Debug: Print all form data
+            print("\n=== FORM DATA ===")
+            for key, value in request.form.items():
+                print(f"{key}: {value}")
             
-            with sqlite3.connect(DB_NAME) as conn:
-                conn.execute("""
-                    INSERT INTO words (unit_id, word, definition, example, section)
-                    VALUES (?, ?, ?, ?, ?)
-                """, (unit_id, word, definition, example, section))
-                conn.commit()
-                flash('AI vocabulary word added successfully', 'success')
-                return redirect(url_for('admin_add_word'))
+            # Parse core elements properly
+            core_elements_list = parse_core_elements(request.form)
+            
+            # If core_elements is empty, check if there's a textarea version
+            if not core_elements_list and 'core_elements' in request.form:
+                # Handle textarea input (fallback)
+                textarea_value = request.form.get('core_elements', '').strip()
+                if textarea_value:
+                    # Parse textarea format: "Core Element - Everyday Object" per line
+                    core_elements_list = []
+                    for line in textarea_value.split('\n'):
+                        if ' - ' in line:
+                            parts = line.split(' - ', 1)
+                            if len(parts) == 2:
+                                core_elements_list.append({
+                                    'core_element': parts[0].strip(),
+                                    'everyday_object': parts[1].strip()
+                                })
+            
+            print(f"\nFinal core_elements_list: {core_elements_list}")
+            
+            data = {
+                'unit_id': request.form['unit_id'],
+                'word': request.form['word'],
+                'one_sentence_version': request.form.get('one_sentence_version', ''),
+                'daily_definition': request.form.get('daily_definition', ''),
+                'life_metaphor': request.form.get('life_metaphor', ''),
+                'visual_explanation': request.form.get('visual_explanation', ''),
+                'core_elements': json.dumps(core_elements_list),  # Store as JSON string
+                'scenario_theater': request.form.get('scenario_theater', ''),
+                'misunderstandings': request.form.get('misunderstandings', ''),
+                'reality_connection': request.form.get('reality_connection', ''),
+                'thinking_bubble': request.form.get('thinking_bubble', ''),
+                'smiling_conclusion': request.form.get('smiling_conclusion', ''),
+                'section': request.form.get('section', 1)
+            }
+            
+            print(f"\nData to insert: {data['core_elements']}")
+
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO words (
+                    unit_id, word, one_sentence_version, daily_definition, life_metaphor,
+                    visual_explanation, core_elements, scenario_theater,
+                    misunderstandings, reality_connection, thinking_bubble,
+                    smiling_conclusion, section
+                )
+                VALUES (
+                    %(unit_id)s, %(word)s, %(one_sentence_version)s, %(daily_definition)s, %(life_metaphor)s,
+                    %(visual_explanation)s, %(core_elements)s::jsonb, %(scenario_theater)s,
+                    %(misunderstandings)s, %(reality_connection)s, %(thinking_bubble)s,
+                    %(smiling_conclusion)s, %(section)s
+                )
+            """, data)
+
+
+       
+
+
+            conn.commit()
+            cursor.close()
+            flash('AI vocabulary word added successfully', 'success')
+            return redirect(url_for('admin_manage_content'))
+
         except Exception as e:
+            if conn:
+                conn.rollback()
+            logger.error(f"Admin add word error: {str(e)}")
             flash(f'Error adding word: {str(e)}', 'danger')
-    
+        finally:
+            if conn:
+                release_db_connection(conn)
+
     return render_template('admin/add_word.html')
+
+
+
+
+
 
 @app.route('/admin/add_quiz', methods=['GET', 'POST'])
 @admin_required
-def admin_add_quiz():
+def admin_add_quiz() -> Any:
+    """Add a new quiz question."""
     if request.method == 'POST':
+        conn = None
         try:
             data = request.form
             unit_id = data['unit_id']
@@ -1462,23 +2712,32 @@ def admin_add_quiz():
             correct_answer = int(data['correct_answer'])
             explanation = data['explanation']
             
-            with sqlite3.connect(DB_NAME) as conn:
-                conn.execute("""
-                    INSERT INTO quizzes (unit_id, question, options, correct_answer, explanation)
-                    VALUES (?, ?, ?, ?, ?)
-                """, (unit_id, question, json.dumps(options), correct_answer, explanation))
-                conn.commit()
-                flash('Quiz question added successfully', 'success')
-                return redirect(url_for('admin_add_quiz'))
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO quizzes (unit_id, question, options, correct_answer, explanation)
+                VALUES (%s, %s, %s, %s, %s)
+            """, (unit_id, question, json.dumps(options), correct_answer, explanation))
+            conn.commit()
+            cursor.close()
+            flash('Quiz question added successfully', 'success')
+            return redirect(url_for('admin_add_quiz'))
         except Exception as e:
+            logger.error(f"Admin add quiz error: {str(e)}")
             flash(f'Error adding quiz: {str(e)}', 'danger')
+        finally:
+            if conn:
+                release_db_connection(conn)
     
     return render_template('admin/add_quiz.html')
 
+
 @app.route('/admin/add_material', methods=['GET', 'POST'])
 @admin_required
-def admin_add_material():
+def admin_add_material() -> Any:
+    """Add new learning material."""
     if request.method == 'POST':
+        conn = None
         try:
             unit_id = request.form['unit_id']
             file = request.files.get('file')
@@ -1503,44 +2762,44 @@ def admin_add_material():
                 # Get any content if provided (now optional)
                 content = request.form.get('content', '')
                 
-                with sqlite3.connect(DB_NAME) as conn:
-                    conn.execute("""
-                        INSERT INTO materials (unit_id, title, content, file_path)
-                        VALUES (?, ?, ?, ?)
-                    """, (unit_id, title, content, filename))
-                    conn.commit()
-                    flash('Material added successfully', 'success')
-                    return redirect(url_for('admin_manage_content'))
+                conn = get_db_connection()
+                cursor = conn.cursor()
+                cursor.execute("""
+                    INSERT INTO materials (unit_id, title, content, file_path)
+                    VALUES (%s, %s, %s, %s)
+                """, (unit_id, title, content, filename))
+                conn.commit()
+                cursor.close()
+                flash('Material added successfully', 'success')
+                return redirect(url_for('admin_manage_content'))
             else:
                 flash(f'Invalid file type. Allowed types: {", ".join(ALLOWED_EXTENSIONS)}', 'danger')
         except Exception as e:
+            logger.error(f"Admin add material error: {str(e)}")
             flash(f'Error adding material: {str(e)}', 'danger')
+        finally:
+            if conn:
+                release_db_connection(conn)
     
     return render_template('admin/add_material.html')
 
+
 @app.route('/admin/edit_material/<int:material_id>', methods=['GET', 'POST'])
 @admin_required
-def admin_edit_material(material_id):
-    with sqlite3.connect(DB_NAME) as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM materials WHERE id=?", (material_id,))
+def admin_edit_material(material_id: int) -> Any:
+    """Edit existing learning material."""
+    conn = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("SELECT * FROM materials WHERE id=%s", (material_id,))
         material = cursor.fetchone()
         
         if not material:
             flash('Material not found', 'danger')
             return redirect(url_for('admin_manage_content'))
-        
-        # Convert to dict for easier access
-        material = {
-            'id': material[0],
-            'unit_id': material[1],
-            'title': material[2],
-            'content': material[3],
-            'file_path': material[4]
-        }
-    
-    if request.method == 'POST':
-        try:
+            
+        if request.method == 'POST':
             unit_id = request.form['unit_id']
             title = request.form['title']
             content = request.form.get('content', '')  # Now optional
@@ -1568,25 +2827,33 @@ def admin_edit_material(material_id):
                     flash(f'Invalid file type. Allowed types: {", ".join(ALLOWED_EXTENSIONS)}', 'danger')
                     return redirect(url_for('admin_edit_material', material_id=material_id))
             
-            with sqlite3.connect(DB_NAME) as conn:
-                conn.execute("""
-                    UPDATE materials
-                    SET unit_id=?, title=?, content=?, file_path=?
-                    WHERE id=?
-                """, (unit_id, title, content, file_path, material_id))
-                conn.commit()
-                flash('Material updated successfully', 'success')
-                return redirect(url_for('admin_manage_content'))
-                
-        except Exception as e:
-            flash(f'Error updating material: {str(e)}', 'danger')
+            cursor.execute("""
+                UPDATE materials
+                SET unit_id=%s, title=%s, content=%s, file_path=%s
+                WHERE id=%s
+            """, (unit_id, title, content, file_path, material_id))
+            conn.commit()
+            flash('Material updated successfully', 'success')
+            return redirect(url_for('admin_manage_content'))
+        
+        cursor.close()
+    except Exception as e:
+        logger.error(f"Admin edit material error: {str(e)}")
+        flash(f'Error editing material: {str(e)}', 'danger')
+        return redirect(url_for('admin_manage_content'))
+    finally:
+        if conn:
+            release_db_connection(conn)
     
     return render_template('admin/edit_material.html', material=material)
 
+
 @app.route('/admin/add_video', methods=['GET', 'POST'])
 @admin_required
-def admin_add_video():
+def admin_add_video() -> Any:
+    """Add a new video resource."""
     if request.method == 'POST':
+        conn = None
         try:
             title = request.form['title']
             youtube_url = request.form['youtube_url']
@@ -1606,51 +2873,66 @@ def admin_add_video():
             else:
                 youtube_id = youtube_url  # Assume ID was provided directly
             
-            with sqlite3.connect(DB_NAME) as conn:
-                conn.execute("""
-                    INSERT INTO videos (unit_id, title, youtube_url, description)
-                    VALUES (?, ?, ?, ?)
-                """, (unit_id, title, youtube_id, description))
-                conn.commit()
-                flash('Video added successfully', 'success')
-                return redirect(url_for('admin_add_video'))
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO videos (unit_id, title, youtube_url, description)
+                VALUES (%s, %s, %s, %s)
+            """, (unit_id, title, youtube_id, description))
+            conn.commit()
+            cursor.close()
+            flash('Video added successfully', 'success')
+            return redirect(url_for('admin_add_video'))
         except Exception as e:
+            logger.error(f"Admin add video error: {str(e)}")
             flash(f'Error adding video: {str(e)}', 'danger')
+        finally:
+            if conn:
+                release_db_connection(conn)
     
     return render_template('admin/add_video.html')
 
+
 @app.route('/admin/add_project', methods=['GET', 'POST'])
 @admin_required
-def admin_add_project():
+def admin_add_project() -> Any:
+    """Add a new project assignment."""
     if request.method == 'POST':
+        conn = None
         try:
             title = request.form['title']
             description = request.form['description']
             resources = request.form['resources']
             unit_id = request.form['unit_id']
             
-            with sqlite3.connect(DB_NAME) as conn:
-                conn.execute("""
-                    INSERT INTO projects (unit_id, title, description, resources)
-                    VALUES (?, ?, ?, ?)
-                """, (unit_id, title, description, resources))
-                conn.commit()
-                flash('Project added successfully', 'success')
-                return redirect(url_for('admin_add_project'))
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO projects (unit_id, title, description, resources)
+                VALUES (%s, %s, %s, %s)
+            """, (unit_id, title, description, resources))
+            conn.commit()
+            cursor.close()
+            flash('Project added successfully', 'success')
+            return redirect(url_for('admin_add_project'))
         except Exception as e:
+            logger.error(f"Admin add project error: {str(e)}")
             flash(f'Error adding project: {str(e)}', 'danger')
+        finally:
+            if conn:
+                release_db_connection(conn)
     
     return render_template('admin/add_project.html')
 
+
 @app.route('/admin/manage_content')
 @admin_required
-def admin_manage_content():
-    # Ensure words table exists
-    check_and_create_words_table()
-    
-    with sqlite3.connect(DB_NAME) as conn:
-        conn.row_factory = sqlite3.Row
-        cursor = conn.cursor()
+def admin_manage_content() -> Any:
+    """Manage all content types."""
+    conn = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
         
         # Get all quizzes
         cursor.execute("SELECT id, unit_id, question FROM quizzes ORDER BY unit_id, id")
@@ -1671,6 +2953,19 @@ def admin_manage_content():
         # Get all AI vocabulary words with section
         cursor.execute("SELECT id, unit_id, word, section FROM words ORDER BY unit_id, section, id")
         words = cursor.fetchall()
+        
+        cursor.close()
+    except Exception as e:
+        logger.error(f"Admin manage content error: {str(e)}")
+        flash(f'Error retrieving content: {str(e)}', 'danger')
+        quizzes = []
+        materials = []
+        videos = []
+        projects = []
+        words = []
+    finally:
+        if conn:
+            release_db_connection(conn)
     
     return render_template('admin/manage_content.html', 
                           quizzes=quizzes,
@@ -1679,143 +2974,580 @@ def admin_manage_content():
                           projects=projects,
                           words=words)
 
+
 @app.route('/admin/export_users', methods=['GET'])
 @admin_required
-def admin_export_users():
+def admin_export_users() -> Any:
+    """Export users to CSV."""
     try:
-        with sqlite3.connect(DB_NAME) as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT id, name, language FROM users ORDER BY id")
-            users = cursor.fetchall()
-            
-            headers = ['ID', 'Username', 'Language']
-            csv_file = generate_csv_file(users, 'users.csv', headers)
-            
-            if csv_file:
-                return send_file(csv_file, 
-                               mimetype='text/csv',
-                               as_attachment=True,
-                               download_name='users.csv')
-            else:
-                flash('Error generating CSV file', 'danger')
-                return redirect(url_for('admin_users'))
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT id, username, email, language, email_verified FROM users ORDER BY id")
+        users = cursor.fetchall()
+        cursor.close()
+        release_db_connection(conn)
+        
+        headers = ['ID', 'Username', 'Email', 'Language', 'Email Verified']
+        csv_file = generate_csv_file(users, 'users.csv', headers)
+        
+        if csv_file:
+            return send_file(csv_file, 
+                           mimetype='text/csv',
+                           as_attachment=True,
+                           download_name='users.csv')
+        else:
+            flash('Error generating CSV file', 'danger')
+            return redirect(url_for('admin_users'))
     except Exception as e:
+        logger.error(f"Admin export users error: {str(e)}")
         flash(f'Error exporting users: {str(e)}', 'danger')
         return redirect(url_for('admin_users'))
 
+
 @app.route('/admin/export_progress', methods=['GET'])
 @admin_required
-def admin_export_progress():
+def admin_export_progress() -> Any:
+    """Export user progress to CSV."""
     try:
-        with sqlite3.connect(DB_NAME) as conn:
-            conn.row_factory = sqlite3.Row
-            cursor = conn.cursor()
-            cursor.execute("""
-                SELECT u.id, u.name, p.unit_number, p.completed, 
-                       p.quiz_score, p.project_completed
-                FROM users u
-                LEFT JOIN progress p ON u.id = p.user_id
-                ORDER BY u.name, p.unit_number
-            """)
-            progress = cursor.fetchall()
-            
-            # Convert to list format
-            data = []
-            for row in progress:
-                data.append([
-                    row['id'], row['name'], row['unit_number'], 
-                    row['completed'], row['quiz_score'], row['project_completed']
-                ])
-            
-            headers = ['User ID', 'Username', 'Unit', 'Completed', 'Quiz Score', 'Project Completed']
-            csv_file = generate_csv_file(data, 'progress.csv', headers)
-            
-            if csv_file:
-                return send_file(csv_file, 
-                               mimetype='text/csv',
-                               as_attachment=True,
-                               download_name='user_progress.csv')
-            else:
-                flash('Error generating CSV file', 'danger')
-                return redirect(url_for('admin_dashboard'))
+        conn = get_db_connection()
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            SELECT u.id, u.username, p.unit_number, p.completed, 
+                   p.quiz_score, p.project_completed
+            FROM users u
+            LEFT JOIN progress p ON u.id = p.user_id
+            ORDER BY u.username, p.unit_number
+        """)
+        progress = cursor.fetchall()
+        cursor.close()
+        release_db_connection(conn)
+        
+        # Convert to list format
+        data = []
+        for row in progress:
+            data.append([
+                row['id'], row['username'], row['unit_number'], 
+                row['completed'], row['quiz_score'], row['project_completed']
+            ])
+        
+        headers = ['User ID', 'Username', 'Unit', 'Completed', 'Quiz Score', 'Project Completed']
+        csv_file = generate_csv_file(data, 'progress.csv', headers)
+        
+        if csv_file:
+            return send_file(csv_file, 
+                           mimetype='text/csv',
+                           as_attachment=True,
+                           download_name='user_progress.csv')
+        else:
+            flash('Error generating CSV file', 'danger')
+            return redirect(url_for('admin_dashboard'))
     except Exception as e:
+        logger.error(f"Admin export progress error: {str(e)}")
         flash(f'Error exporting progress: {str(e)}', 'danger')
         return redirect(url_for('admin_dashboard'))
 
+
 @app.route('/admin/export_feedback', methods=['GET'])
 @admin_required
-def admin_export_feedback():
+def admin_export_feedback() -> Any:
+    """Export feedback to CSV."""
     try:
-        with sqlite3.connect(DB_NAME) as conn:
-            conn.row_factory = sqlite3.Row
-            cursor = conn.cursor()
-            cursor.execute("""
-                SELECT u.name, f.feedback_text, f.rating, f.created_at
-                FROM feedback f
-                JOIN users u ON f.user_id = u.id
-                ORDER BY f.created_at DESC
-            """)
-            feedback = cursor.fetchall()
-            
-            # Convert to list format
-            data = []
-            for row in feedback:
-                data.append([
-                    row['name'], row['feedback_text'], 
-                    row['rating'], row['created_at']
-                ])
-            
-            headers = ['Username', 'Feedback', 'Rating', 'Created At']
-            csv_file = generate_csv_file(data, 'feedback.csv', headers)
-            
-            if csv_file:
-                return send_file(csv_file, 
-                               mimetype='text/csv',
-                               as_attachment=True,
-                               download_name='user_feedback.csv')
-            else:
-                flash('Error generating CSV file', 'danger')
-                return redirect(url_for('admin_feedback'))
+        conn = get_db_connection()
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            SELECT u.username, f.feedback_text, f.rating, f.created_at
+            FROM feedback f
+            JOIN users u ON f.user_id = u.id
+            ORDER BY f.created_at DESC
+        """)
+        feedback = cursor.fetchall()
+        cursor.close()
+        release_db_connection(conn)
+        
+        # Convert to list format
+        data = []
+        for row in feedback:
+            data.append([
+                row['username'], row['feedback_text'], 
+                row['rating'], row['created_at']
+            ])
+        
+        headers = ['Username', 'Feedback', 'Rating', 'Created At']
+        csv_file = generate_csv_file(data, 'feedback.csv', headers)
+        
+        if csv_file:
+            return send_file(csv_file, 
+                           mimetype='text/csv',
+                           as_attachment=True,
+                           download_name='user_feedback.csv')
+        else:
+            flash('Error generating CSV file', 'danger')
+            return redirect(url_for('admin_feedback'))
     except Exception as e:
+        logger.error(f"Admin export feedback error: {str(e)}")
         flash(f'Error exporting feedback: {str(e)}', 'danger')
         return redirect(url_for('admin_feedback'))
 
+
 @app.route('/admin/reset_db', methods=['GET', 'POST'])
 @admin_required
-def admin_reset_db():
+def admin_reset_db() -> Any:
+    """Reset database tables."""
     if request.method == 'POST':
         confirmation = request.form.get('confirmation')
         if confirmation == 'RESET':
-            if reset_database():
-                # Re-initialize with sample data
-                add_sample_data()
+            try:
+                conn = get_db_connection()
+                cursor = conn.cursor()
+                
+                # Delete all user data except admin users
+                tables = [
+                    'feedback', 'qa_history', 'quiz_attempts', 'submissions',
+                    'progress', 'words', 'projects', 'videos', 'materials', 'quizzes',
+                    'team_members', 'team_scores', 'teams'
+                ]
+                
+                for table in tables:
+                    cursor.execute(f"TRUNCATE TABLE {table} CASCADE")
+                
+                # Maintain admin users but reset regular users
+                cursor.execute("TRUNCATE TABLE users CASCADE")
+                
+                conn.commit()
+                cursor.close()
+                release_db_connection(conn)
+                
                 flash('Database has been reset successfully', 'success')
-            else:
-                flash('Error resetting database', 'danger')
-            return redirect(url_for('admin_dashboard'))
+                return redirect(url_for('admin_dashboard'))
+            except Exception as e:
+                logger.error(f"DB reset error: {str(e)}")
+                flash(f'Error resetting database: {str(e)}', 'danger')
+                return redirect(url_for('admin_dashboard'))
         else:
             flash('Incorrect confirmation text', 'danger')
     
     return render_template('admin/reset_db.html')
 
+
 @app.route('/admin/logout')
-def admin_logout():
+def admin_logout() -> Any:
+    """Handle admin logout."""
     session.pop('admin', None)
     session.pop('admin_username', None)
     flash('You have been logged out from admin panel', 'info')
     return redirect(url_for('admin_login'))
+
+
+# ---------- TEAM MANAGEMENT ROUTES ----------
+@app.route('/admin/teams')
+@admin_required
+def admin_teams() -> Any:
+    """Manage teams."""
+    conn = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        
+        # Get all teams with their lead names and member counts
+        cursor.execute("""
+            SELECT t.id, t.name, t.camp, u.username AS team_lead_name, 
+                   COUNT(tm.id) AS member_count,
+                   COALESCE(ts.score, 0) AS team_score
+            FROM teams t
+            LEFT JOIN users u ON t.team_lead_id = u.id
+            LEFT JOIN team_members tm ON t.id = tm.team_id
+            LEFT JOIN team_scores ts ON t.id = ts.team_id
+            GROUP BY t.id, u.username, ts.score
+            ORDER BY t.camp, COALESCE(ts.score, 0) DESC
+        """)
+        teams = cursor.fetchall()
+        
+        cursor.close()
+        return render_template('admin/teams.html', teams=teams)
+    except Exception as e:
+        logger.error(f"Error in admin_teams: {str(e)}")
+        flash(f"An error occurred: {str(e)}", "danger")
+        return redirect(url_for('admin_dashboard'))
+    finally:
+        if conn:
+            release_db_connection(conn)
+
+
+@app.route('/admin/add_team', methods=['GET', 'POST'])
+@admin_required
+def admin_add_team() -> Any:
+    """Add a new team."""
+    if request.method == 'POST':
+        team_name = request.form.get('team_name')
+        team_lead_id = request.form.get('team_lead_id')
+        camp = request.form.get('camp')
+        
+        if not all([team_name, team_lead_id, camp]):
+            flash("All fields are required", "danger")
+            return redirect(url_for('admin_add_team'))
+            
+        conn = None
+        try:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            
+            # Create the team
+            cursor.execute("""
+                INSERT INTO teams (name, team_lead_id, camp)
+                VALUES (%s, %s, %s) RETURNING id
+            """, (team_name, team_lead_id, camp))
+            team_id = cursor.fetchone()[0]
+            
+            # Add team lead to team members
+            cursor.execute("""
+                INSERT INTO team_members (team_id, user_id)
+                VALUES (%s, %s)
+            """, (team_id, team_lead_id))
+            
+            # Initialize team score
+            cursor.execute("""
+                INSERT INTO team_scores (team_id, score)
+                VALUES (%s, 0)
+            """, (team_id,))
+            
+            conn.commit()
+            flash("Team created successfully", "success")
+            return redirect(url_for('admin_teams'))
+        except Exception as e:
+            if conn:
+                conn.rollback()
+            logger.error(f"Error in admin_add_team: {str(e)}")
+            flash(f"An error occurred: {str(e)}", "danger")
+            return redirect(url_for('admin_add_team'))
+        finally:
+            if conn:
+                cursor.close()
+                release_db_connection(conn)
+    
+    # GET method - display the form
+    conn = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        
+        # Get all users for the team lead dropdown
+        cursor.execute("""
+            SELECT id, username, email 
+            FROM users 
+            ORDER BY username
+        """)
+        users = cursor.fetchall()
+        
+        cursor.close()
+        return render_template('admin/add_team.html', users=users)
+    except Exception as e:
+        logger.error(f"Error in admin_add_team GET: {str(e)}")
+        flash(f"An error occurred: {str(e)}", "danger")
+        return redirect(url_for('admin_teams'))
+    finally:
+        if conn:
+            release_db_connection(conn)
+
+
+@app.route('/admin/edit_team/<int:team_id>', methods=['GET', 'POST'])
+@admin_required
+def admin_edit_team(team_id: int) -> Any:
+    """Edit an existing team."""
+    if request.method == 'POST':
+        team_name = request.form.get('team_name')
+        team_lead_id = request.form.get('team_lead_id')
+        camp = request.form.get('camp')
+        
+        if not all([team_name, team_lead_id, camp]):
+            flash("All fields are required", "danger")
+            return redirect(url_for('admin_edit_team', team_id=team_id))
+            
+        conn = None
+        try:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            
+            # Update the team
+            cursor.execute("""
+                UPDATE teams SET name = %s, team_lead_id = %s, camp = %s
+                WHERE id = %s
+            """, (team_name, team_lead_id, camp, team_id))
+            
+            conn.commit()
+            flash("Team updated successfully", "success")
+            return redirect(url_for('admin_teams'))
+        except Exception as e:
+            if conn:
+                conn.rollback()
+            logger.error(f"Error in admin_edit_team: {str(e)}")
+            flash(f"An error occurred: {str(e)}", "danger")
+            return redirect(url_for('admin_edit_team', team_id=team_id))
+        finally:
+            if conn:
+                cursor.close()
+                release_db_connection(conn)
+    
+    # GET method - display the form with current data
+    conn = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        
+        # Get team data
+        cursor.execute("""
+            SELECT * FROM teams WHERE id = %s
+        """, (team_id,))
+        team = cursor.fetchone()
+        
+        if not team:
+            flash("Team not found", "danger")
+            return redirect(url_for('admin_teams'))
+        
+        # Get all users for the team lead dropdown
+        cursor.execute("""
+            SELECT id, username, email 
+            FROM users 
+            ORDER BY username
+        """)
+        users = cursor.fetchall()
+        
+        cursor.close()
+        return render_template('admin/edit_team.html', team=team, users=users)
+    except Exception as e:
+        logger.error(f"Error in admin_edit_team GET: {str(e)}")
+        flash(f"An error occurred: {str(e)}", "danger")
+        return redirect(url_for('admin_teams'))
+    finally:
+        if conn:
+            release_db_connection(conn)
+
+
+@app.route('/admin/delete_team/<int:team_id>')
+@admin_required
+def admin_delete_team(team_id: int) -> Any:
+    """Delete a team."""
+    conn = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        # Delete the team (cascade will handle team_members and team_scores)
+        cursor.execute("DELETE FROM teams WHERE id = %s", (team_id,))
+        
+        conn.commit()
+        flash("Team deleted successfully", "success")
+        return redirect(url_for('admin_teams'))
+    except Exception as e:
+        if conn:
+            conn.rollback()
+        logger.error(f"Error in admin_delete_team: {str(e)}")
+        flash(f"An error occurred: {str(e)}", "danger")
+        return redirect(url_for('admin_teams'))
+    finally:
+        if conn:
+            cursor.close()
+            release_db_connection(conn)
+
+
+@app.route('/admin/team_members/<int:team_id>')
+@admin_required
+def admin_team_members(team_id: int) -> Any:
+    """Manage team members."""
+    conn = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        
+        # Get team info
+        cursor.execute("""
+            SELECT t.*, u.username AS team_lead_name
+            FROM teams t
+            LEFT JOIN users u ON t.team_lead_id = u.id
+            WHERE t.id = %s
+        """, (team_id,))
+        team = cursor.fetchone()
+        
+        if not team:
+            flash("Team not found", "danger")
+            return redirect(url_for('admin_teams'))
+        
+        # Get team members
+        cursor.execute("""
+            SELECT tm.id, tm.user_id, u.username, u.email, tm.joined_at
+            FROM team_members tm
+            JOIN users u ON tm.user_id = u.id
+            WHERE tm.team_id = %s
+            ORDER BY u.username
+        """, (team_id,))
+        members = cursor.fetchall()
+        
+        # Get non-team members for adding
+        cursor.execute("""
+            SELECT id, username, email
+            FROM users
+            WHERE id NOT IN (
+                SELECT user_id FROM team_members WHERE team_id = %s
+            )
+            ORDER BY username
+        """, (team_id,))
+        non_members = cursor.fetchall()
+        
+        cursor.close()
+        return render_template('admin/team_members.html', 
+                             team=team, 
+                             members=members, 
+                             non_members=non_members)
+    except Exception as e:
+        logger.error(f"Error in admin_team_members: {str(e)}")
+        flash(f"An error occurred: {str(e)}", "danger")
+        return redirect(url_for('admin_teams'))
+    finally:
+        if conn:
+            release_db_connection(conn)
+
+
+@app.route('/admin/add_team_member/<int:team_id>', methods=['POST'])
+@admin_required
+def admin_add_team_member(team_id: int) -> Any:
+    """Add a user to a team."""
+    user_id = request.form.get('user_id')
+    
+    if not user_id:
+        flash("User selection is required", "danger")
+        return redirect(url_for('admin_team_members', team_id=team_id))
+        
+    conn = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        # Add user to team
+        cursor.execute("""
+            INSERT INTO team_members (team_id, user_id)
+            VALUES (%s, %s)
+        """, (team_id, user_id))
+        
+        conn.commit()
+        flash("Member added to team successfully", "success")
+        return redirect(url_for('admin_team_members', team_id=team_id))
+    except psycopg2.errors.UniqueViolation:
+        # Handle unique constraint violation
+        if conn:
+            conn.rollback()
+        flash("User is already a member of this team", "warning")
+        return redirect(url_for('admin_team_members', team_id=team_id))
+    except Exception as e:
+        if conn:
+            conn.rollback()
+        logger.error(f"Error in admin_add_team_member: {str(e)}")
+        flash(f"An error occurred: {str(e)}", "danger")
+        return redirect(url_for('admin_team_members', team_id=team_id))
+    finally:
+        if conn:
+            cursor.close()
+            release_db_connection(conn)
+
+
+@app.route('/admin/remove_team_member/<int:member_id>')
+@admin_required
+def admin_remove_team_member(member_id: int) -> Any:
+    """Remove a user from a team."""
+    conn = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        # Get team_id for redirect
+        cursor.execute("SELECT team_id FROM team_members WHERE id = %s", (member_id,))
+        result = cursor.fetchone()
+        
+        if not result:
+            flash("Member not found", "danger")
+            return redirect(url_for('admin_teams'))
+            
+        team_id = result[0]
+        
+        # Remove user from team
+        cursor.execute("DELETE FROM team_members WHERE id = %s", (member_id,))
+        
+        conn.commit()
+        flash("Member removed from team successfully", "success")
+        return redirect(url_for('admin_team_members', team_id=team_id))
+    except Exception as e:
+        if conn:
+            conn.rollback()
+        logger.error(f"Error in admin_remove_team_member: {str(e)}")
+        flash(f"An error occurred: {str(e)}", "danger")
+        return redirect(url_for('admin_teams'))
+    finally:
+        if conn:
+            cursor.close()
+            release_db_connection(conn)
+
+
+@app.route('/admin/update_team_score/<int:team_id>', methods=['POST'])
+@admin_required
+def admin_update_team_score(team_id: int) -> Any:
+    """Update a team's score manually."""
+    score = request.form.get('score')
+    
+    if not score or not score.isdigit():
+        flash("Valid score is required", "danger")
+        return redirect(url_for('admin_teams'))
+        
+    conn = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        # Check if score exists
+        cursor.execute("SELECT id FROM team_scores WHERE team_id = %s", (team_id,))
+        score_record = cursor.fetchone()
+        
+        if score_record:
+            # Update existing score
+            cursor.execute("""
+                UPDATE team_scores 
+                SET score = %s, updated_at = CURRENT_TIMESTAMP
+                WHERE team_id = %s
+            """, (score, team_id))
+        else:
+            # Insert new score
+            cursor.execute("""
+                INSERT INTO team_scores (team_id, score)
+                VALUES (%s, %s)
+            """, (team_id, score))
+        
+        conn.commit()
+        flash("Team score updated successfully", "success")
+        return redirect(url_for('admin_teams'))
+    except Exception as e:
+        if conn:
+            conn.rollback()
+        logger.error(f"Error in admin_update_team_score: {str(e)}")
+        flash(f"An error occurred: {str(e)}", "danger")
+        return redirect(url_for('admin_teams'))
+    finally:
+        if conn:
+            cursor.close()
+            release_db_connection(conn)
+
 
 # ---------- ADMIN CONTENT MANAGEMENT ROUTES ----------
 
 # Quiz management
 @app.route('/admin/view_quiz/<int:quiz_id>')
 @admin_required
-def admin_view_quiz(quiz_id):
-    with sqlite3.connect(DB_NAME) as conn:
-        conn.row_factory = sqlite3.Row
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM quizzes WHERE id=?", (quiz_id,))
+def admin_view_quiz(quiz_id: int) -> Any:
+    """View a quiz question."""
+    conn = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("SELECT * FROM quizzes WHERE id=%s", (quiz_id,))
         quiz = cursor.fetchone()
+        cursor.close()
+        
         if not quiz:
             flash('Quiz not found', 'danger')
             return redirect(url_for('admin_manage_content'))
@@ -1825,13 +3557,23 @@ def admin_view_quiz(quiz_id):
             options = json.loads(quiz['options'])
         except:
             options = []
+    except Exception as e:
+        logger.error(f"Admin view quiz error: {str(e)}")
+        flash(f'Error viewing quiz: {str(e)}', 'danger')
+        return redirect(url_for('admin_manage_content'))
+    finally:
+        if conn:
+            release_db_connection(conn)
             
-        return render_template('admin/view_quiz.html', quiz=quiz, options=options)
+    return render_template('admin/view_quiz.html', quiz=quiz, options=options)
+
 
 @app.route('/admin/edit_quiz/<int:quiz_id>', methods=['GET', 'POST'])
 @admin_required
-def admin_edit_quiz(quiz_id):
+def admin_edit_quiz(quiz_id: int) -> Any:
+    """Edit a quiz question."""
     if request.method == 'POST':
+        conn = None
         try:
             data = request.form
             unit_id = data['unit_id']
@@ -1840,23 +3582,32 @@ def admin_edit_quiz(quiz_id):
             correct_answer = int(data['correct_answer'])
             explanation = data['explanation']
             
-            with sqlite3.connect(DB_NAME) as conn:
-                conn.execute("""
-                    UPDATE quizzes 
-                    SET unit_id=?, question=?, options=?, correct_answer=?, explanation=?
-                    WHERE id=?
-                """, (unit_id, question, json.dumps(options), correct_answer, explanation, quiz_id))
-                conn.commit()
-                flash('Quiz updated successfully', 'success')
-                return redirect(url_for('admin_manage_content'))
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            cursor.execute("""
+                UPDATE quizzes 
+                SET unit_id=%s, question=%s, options=%s, correct_answer=%s, explanation=%s
+                WHERE id=%s
+            """, (unit_id, question, json.dumps(options), correct_answer, explanation, quiz_id))
+            conn.commit()
+            cursor.close()
+            flash('Quiz updated successfully', 'success')
+            return redirect(url_for('admin_manage_content'))
         except Exception as e:
+            logger.error(f"Admin edit quiz error: {str(e)}")
             flash(f'Error updating quiz: {str(e)}', 'danger')
+        finally:
+            if conn:
+                release_db_connection(conn)
             
-    with sqlite3.connect(DB_NAME) as conn:
-        conn.row_factory = sqlite3.Row
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM quizzes WHERE id=?", (quiz_id,))
+    conn = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("SELECT * FROM quizzes WHERE id=%s", (quiz_id,))
         quiz = cursor.fetchone()
+        cursor.close()
+        
         if not quiz:
             flash('Quiz not found', 'danger')
             return redirect(url_for('admin_manage_content'))
@@ -1866,79 +3617,131 @@ def admin_edit_quiz(quiz_id):
             options = json.loads(quiz['options'])
         except:
             options = []
+    except Exception as e:
+        logger.error(f"Admin edit quiz error: {str(e)}")
+        flash(f'Error loading quiz: {str(e)}', 'danger')
+        return redirect(url_for('admin_manage_content'))
+    finally:
+        if conn:
+            release_db_connection(conn)
             
-        return render_template('admin/edit_quiz.html', quiz=quiz, options=options)
+    return render_template('admin/edit_quiz.html', quiz=quiz, options=options)
+
 
 @app.route('/admin/delete_quiz/<int:quiz_id>')
 @admin_required
-def admin_delete_quiz(quiz_id):
+def admin_delete_quiz(quiz_id: int) -> Any:
+    """Delete a quiz question."""
+    conn = None
     try:
-        with sqlite3.connect(DB_NAME) as conn:
-            conn.execute("DELETE FROM quizzes WHERE id=?", (quiz_id,))
-            conn.commit()
-            flash('Quiz deleted successfully', 'success')
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM quizzes WHERE id=%s", (quiz_id,))
+        conn.commit()
+        cursor.close()
+        flash('Quiz deleted successfully', 'success')
     except Exception as e:
+        logger.error(f"Admin delete quiz error: {str(e)}")
         flash(f'Error deleting quiz: {str(e)}', 'danger')
+    finally:
+        if conn:
+            release_db_connection(conn)
     return redirect(url_for('admin_manage_content'))
+
 
 # Material management
 @app.route('/admin/view_material/<int:material_id>')
 @admin_required
-def admin_view_material(material_id):
-    with sqlite3.connect(DB_NAME) as conn:
-        conn.row_factory = sqlite3.Row
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM materials WHERE id=?", (material_id,))
+def admin_view_material(material_id: int) -> Any:
+    """View learning material."""
+    conn = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("SELECT * FROM materials WHERE id=%s", (material_id,))
         material = cursor.fetchone()
+        cursor.close()
+        
         if not material:
             flash('Material not found', 'danger')
             return redirect(url_for('admin_manage_content'))
-        return render_template('admin/view_material.html', material=material)
+    except Exception as e:
+        logger.error(f"Admin view material error: {str(e)}")
+        flash(f'Error viewing material: {str(e)}', 'danger')
+        return redirect(url_for('admin_manage_content'))
+    finally:
+        if conn:
+            release_db_connection(conn)
+            
+    return render_template('admin/view_material.html', material=material)
+
 
 @app.route('/admin/delete_material/<int:material_id>')
 @admin_required
-def admin_delete_material(material_id):
+def admin_delete_material(material_id: int) -> Any:
+    """Delete learning material."""
+    conn = None
     try:
-        with sqlite3.connect(DB_NAME) as conn:
-            conn.row_factory = sqlite3.Row
-            cursor = conn.cursor()
-            cursor.execute("SELECT file_path FROM materials WHERE id=?", (material_id,))
-            material = cursor.fetchone()
-            
-            # Delete the file if it exists
-            if material and material['file_path']:
-                file_path = os.path.join(UPLOAD_FOLDER, material['file_path'])
-                if os.path.exists(file_path):
-                    try:
-                        os.remove(file_path)
-                    except:
-                        pass
-            
-            conn.execute("DELETE FROM materials WHERE id=?", (material_id,))
-            conn.commit()
-            flash('Material deleted successfully', 'success')
+        conn = get_db_connection()
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("SELECT file_path FROM materials WHERE id=%s", (material_id,))
+        material = cursor.fetchone()
+        
+        # Delete the file if it exists
+        if material and material['file_path']:
+            file_path = os.path.join(UPLOAD_FOLDER, material['file_path'])
+            if os.path.exists(file_path):
+                try:
+                    os.remove(file_path)
+                except:
+                    logger.error(f"Could not delete file {file_path}")
+        
+        cursor.execute("DELETE FROM materials WHERE id=%s", (material_id,))
+        conn.commit()
+        cursor.close()
+        flash('Material deleted successfully', 'success')
     except Exception as e:
+        logger.error(f"Admin delete material error: {str(e)}")
         flash(f'Error deleting material: {str(e)}', 'danger')
+    finally:
+        if conn:
+            release_db_connection(conn)
     return redirect(url_for('admin_manage_content'))
+
 
 # Video management
 @app.route('/admin/view_video/<int:video_id>')
 @admin_required
-def admin_view_video(video_id):
-    with sqlite3.connect(DB_NAME) as conn:
-        conn.row_factory = sqlite3.Row
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM videos WHERE id=?", (video_id,))
+def admin_view_video(video_id: int) -> Any:
+    """View video details."""
+    conn = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("SELECT * FROM videos WHERE id=%s", (video_id,))
         video = cursor.fetchone()
+        cursor.close()
+        
         if not video:
             flash('Video not found', 'danger')
             return redirect(url_for('admin_manage_content'))
-        return render_template('admin/view_video.html', video=video)
+    except Exception as e:
+        logger.error(f"Admin view video error: {str(e)}")
+        flash(f'Error viewing video: {str(e)}', 'danger')
+        return redirect(url_for('admin_manage_content'))
+    finally:
+        if conn:
+            release_db_connection(conn)
+            
+    return render_template('admin/view_video.html', video=video)
+
 
 @app.route('/admin/edit_video/<int:video_id>', methods=['GET', 'POST'])
 @admin_required
-def admin_edit_video(video_id):
+def admin_edit_video(video_id: int) -> Any:
+    """Edit video details."""
     if request.method == 'POST':
+        conn = None
         try:
             title = request.form['title']
             youtube_url = request.form['youtube_url']
@@ -1958,327 +3761,586 @@ def admin_edit_video(video_id):
             else:
                 youtube_id = youtube_url  # Assume ID was provided directly
             
-            with sqlite3.connect(DB_NAME) as conn:
-                conn.execute("""
-                    UPDATE videos 
-                    SET unit_id=?, title=?, youtube_url=?, description=?
-                    WHERE id=?
-                """, (unit_id, title, youtube_id, description, video_id))
-                conn.commit()
-                flash('Video updated successfully', 'success')
-                return redirect(url_for('admin_manage_content'))
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            cursor.execute("""
+                UPDATE videos 
+                SET unit_id=%s, title=%s, youtube_url=%s, description=%s
+                WHERE id=%s
+            """, (unit_id, title, youtube_id, description, video_id))
+            conn.commit()
+            cursor.close()
+            flash('Video updated successfully', 'success')
+            return redirect(url_for('admin_manage_content'))
         except Exception as e:
+            logger.error(f"Admin edit video error: {str(e)}")
             flash(f'Error updating video: {str(e)}', 'danger')
+        finally:
+            if conn:
+                release_db_connection(conn)
             
-    with sqlite3.connect(DB_NAME) as conn:
-        conn.row_factory = sqlite3.Row
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM videos WHERE id=?", (video_id,))
+    conn = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("SELECT * FROM videos WHERE id=%s", (video_id,))
         video = cursor.fetchone()
+        cursor.close()
+        
         if not video:
             flash('Video not found', 'danger')
             return redirect(url_for('admin_manage_content'))
-        return render_template('admin/edit_video.html', video=video)
+    except Exception as e:
+        logger.error(f"Admin load video error: {str(e)}")
+        flash(f'Error loading video: {str(e)}', 'danger')
+        return redirect(url_for('admin_manage_content'))
+    finally:
+        if conn:
+            release_db_connection(conn)
+            
+    return render_template('admin/edit_video.html', video=video)
+
 
 @app.route('/admin/delete_video/<int:video_id>')
 @admin_required
-def admin_delete_video(video_id):
+def admin_delete_video(video_id: int) -> Any:
+    """Delete a video."""
+    conn = None
     try:
-        with sqlite3.connect(DB_NAME) as conn:
-            conn.execute("DELETE FROM videos WHERE id=?", (video_id,))
-            conn.commit()
-            flash('Video deleted successfully', 'success')
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM videos WHERE id=%s", (video_id,))
+        conn.commit()
+        cursor.close()
+        flash('Video deleted successfully', 'success')
     except Exception as e:
+        logger.error(f"Admin delete video error: {str(e)}")
         flash(f'Error deleting video: {str(e)}', 'danger')
+    finally:
+        if conn:
+            release_db_connection(conn)
     return redirect(url_for('admin_manage_content'))
+
 
 # Project management
 @app.route('/admin/view_project/<int:project_id>')
 @admin_required
-def admin_view_project(project_id):
-    with sqlite3.connect(DB_NAME) as conn:
-        conn.row_factory = sqlite3.Row
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM projects WHERE id=?", (project_id,))
+def admin_view_project(project_id: int) -> Any:
+    """View project details."""
+    conn = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("SELECT * FROM projects WHERE id=%s", (project_id,))
         project = cursor.fetchone()
+        cursor.close()
+        
         if not project:
             flash('Project not found', 'danger')
             return redirect(url_for('admin_manage_content'))
-        return render_template('admin/view_project.html', project=project)
+    except Exception as e:
+        logger.error(f"Admin view project error: {str(e)}")
+        flash(f'Error viewing project: {str(e)}', 'danger')
+        return redirect(url_for('admin_manage_content'))
+    finally:
+        if conn:
+            release_db_connection(conn)
+            
+    return render_template('admin/view_project.html', project=project)
+
 
 @app.route('/admin/edit_project/<int:project_id>', methods=['GET', 'POST'])
 @admin_required
-def admin_edit_project(project_id):
+def admin_edit_project(project_id: int) -> Any:
+    """Edit project details."""
     if request.method == 'POST':
+        conn = None
         try:
             title = request.form['title']
             description = request.form['description']
             resources = request.form['resources']
             unit_id = request.form['unit_id']
             
-            with sqlite3.connect(DB_NAME) as conn:
-                conn.execute("""
-                    UPDATE projects 
-                    SET unit_id=?, title=?, description=?, resources=?
-                    WHERE id=?
-                """, (unit_id, title, description, resources, project_id))
-                conn.commit()
-                flash('Project updated successfully', 'success')
-                return redirect(url_for('admin_manage_content'))
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            cursor.execute("""
+                UPDATE projects 
+                SET unit_id=%s, title=%s, description=%s, resources=%s
+                WHERE id=%s
+            """, (unit_id, title, description, resources, project_id))
+            conn.commit()
+            cursor.close()
+            flash('Project updated successfully', 'success')
+            return redirect(url_for('admin_manage_content'))
         except Exception as e:
+            logger.error(f"Admin edit project error: {str(e)}")
             flash(f'Error updating project: {str(e)}', 'danger')
+        finally:
+            if conn:
+                release_db_connection(conn)
             
-    with sqlite3.connect(DB_NAME) as conn:
-        conn.row_factory = sqlite3.Row
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM projects WHERE id=?", (project_id,))
+    conn = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("SELECT * FROM projects WHERE id=%s", (project_id,))
         project = cursor.fetchone()
+        cursor.close()
+        
         if not project:
             flash('Project not found', 'danger')
             return redirect(url_for('admin_manage_content'))
-        return render_template('admin/edit_project.html', project=project)
+    except Exception as e:
+        logger.error(f"Admin load project error: {str(e)}")
+        flash(f'Error loading project: {str(e)}', 'danger')
+        return redirect(url_for('admin_manage_content'))
+    finally:
+        if conn:
+            release_db_connection(conn)
+            
+    return render_template('admin/edit_project.html', project=project)
+
 
 @app.route('/admin/delete_project/<int:project_id>')
 @admin_required
-def admin_delete_project(project_id):
+def admin_delete_project(project_id: int) -> Any:
+    """Delete a project."""
+    conn = None
     try:
-        with sqlite3.connect(DB_NAME) as conn:
-            conn.execute("DELETE FROM projects WHERE id=?", (project_id,))
-            conn.commit()
-            flash('Project deleted successfully', 'success')
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM projects WHERE id=%s", (project_id,))
+        conn.commit()
+        cursor.close()
+        flash('Project deleted successfully', 'success')
     except Exception as e:
+        logger.error(f"Admin delete project error: {str(e)}")
         flash(f'Error deleting project: {str(e)}', 'danger')
+    finally:
+        if conn:
+            release_db_connection(conn)
     return redirect(url_for('admin_manage_content'))
+
 
 # Word management
 @app.route('/admin/view_word/<int:word_id>')
 @admin_required
-def admin_view_word(word_id):
-    with sqlite3.connect(DB_NAME) as conn:
-        conn.row_factory = sqlite3.Row
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM words WHERE id=?", (word_id,))
+def admin_view_word(word_id: int) -> Any:
+    """View AI vocabulary word."""
+    conn = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("SELECT * FROM words WHERE id=%s", (word_id,))
         word = cursor.fetchone()
+        cursor.close()
+        
         if not word:
             flash('Word not found', 'danger')
             return redirect(url_for('admin_manage_content'))
-        return render_template('admin/view_word.html', word=word)
+        
+        # Parse core_elements JSON string to list for template use
+        if word.get('core_elements'):
+            try:
+                word['core_elements'] = json.loads(word['core_elements'])
+            except Exception:
+                word['core_elements'] = []
+        else:
+            word['core_elements'] = []
+
+    except Exception as e:
+        logger.error(f"Admin view word error: {str(e)}")
+        flash(f'Error viewing word: {str(e)}', 'danger')
+        return redirect(url_for('admin_manage_content'))
+    finally:
+        if conn:
+            release_db_connection(conn)
+            
+    return render_template('admin/view_word.html', word=word)
+
 
 @app.route('/admin/edit_word/<int:word_id>', methods=['GET', 'POST'])
 @admin_required
-def admin_edit_word(word_id):
+def admin_edit_word(word_id: int) -> Any:
+    """Edit AI vocabulary word."""
     if request.method == 'POST':
+        conn = None
         try:
-            unit_id = request.form['unit_id']
-            word = request.form['word']
-            definition = request.form['definition']
-            example = request.form.get('example', '')
-            section = request.form.get('section', 1)
+            # Parse core elements properly
+            core_elements_list = parse_core_elements(request.form)
             
-            with sqlite3.connect(DB_NAME) as conn:
-                conn.execute("""
-                    UPDATE words 
-                    SET unit_id=?, word=?, definition=?, example=?, section=?
-                    WHERE id=?
-                """, (unit_id, word, definition, example, section, word_id))
-                conn.commit()
-                flash('Word updated successfully', 'success')
-                return redirect(url_for('admin_manage_content'))
+            data = {
+                'unit_id': request.form['unit_id'],
+                'word': request.form['word'],
+                'one_sentence_version': request.form.get('one_sentence_version', ''),
+                'daily_definition': request.form.get('daily_definition', ''),
+                'life_metaphor': request.form.get('life_metaphor', ''),
+                'visual_explanation': request.form.get('visual_explanation', ''),
+                'core_elements': json.dumps(core_elements_list),  # Store as JSON string
+                'scenario_theater': request.form.get('scenario_theater', ''),
+                'misunderstandings': request.form.get('misunderstandings', ''),
+                'reality_connection': request.form.get('reality_connection', ''),
+                'thinking_bubble': request.form.get('thinking_bubble', ''),
+                'smiling_conclusion': request.form.get('smiling_conclusion', ''),
+                'section': request.form.get('section', 1)
+            }
+
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            cursor.execute("""
+                UPDATE words SET
+                    unit_id=%(unit_id)s, word=%(word)s, one_sentence_version=%(one_sentence_version)s, 
+                    daily_definition=%(daily_definition)s, life_metaphor=%(life_metaphor)s, 
+                    visual_explanation=%(visual_explanation)s, core_elements=%(core_elements)s,
+                    scenario_theater=%(scenario_theater)s, misunderstandings=%(misunderstandings)s, 
+                    reality_connection=%(reality_connection)s, thinking_bubble=%(thinking_bubble)s, 
+                    smiling_conclusion=%(smiling_conclusion)s, section=%(section)s
+                WHERE id=%(id)s
+            """, {**data, 'id': word_id})
+            
+            conn.commit()
+            cursor.close()
+            flash('Word updated successfully', 'success')
+            return redirect(url_for('admin_manage_content'))
         except Exception as e:
+            if conn:
+                conn.rollback()
+            logger.error(f"Admin edit word error: {str(e)}")
             flash(f'Error updating word: {str(e)}', 'danger')
-            
-    with sqlite3.connect(DB_NAME) as conn:
-        conn.row_factory = sqlite3.Row
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM words WHERE id=?", (word_id,))
+        finally:
+            if conn:
+                release_db_connection(conn)
+
+    # GET method - load the word
+    conn = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("SELECT * FROM words WHERE id=%s", (word_id,))
         word = cursor.fetchone()
+        cursor.close()
+
         if not word:
             flash('Word not found', 'danger')
             return redirect(url_for('admin_manage_content'))
-        return render_template('admin/edit_word.html', word=word)
+        
+        # Parse core_elements JSON string to Python list
+        if word.get('core_elements'):
+            try:
+                word['core_elements'] = json.loads(word['core_elements'])
+            except Exception:
+                word['core_elements'] = []
+        else:
+            word['core_elements'] = []
+
+    except Exception as e:
+        logger.error(f"Admin load word error: {str(e)}")
+        flash(f'Error loading word: {str(e)}', 'danger')
+        return redirect(url_for('admin_manage_content'))
+    finally:
+        if conn:
+            release_db_connection(conn)
+
+    return render_template('admin/edit_word.html', word=word)
+
 
 @app.route('/admin/delete_word/<int:word_id>')
 @admin_required
-def admin_delete_word(word_id):
+def admin_delete_word(word_id: int) -> Any:
+    """Delete AI vocabulary word."""
+    conn = None
     try:
-        with sqlite3.connect(DB_NAME) as conn:
-            conn.execute("DELETE FROM words WHERE id=?", (word_id,))
-            conn.commit()
-            flash('Word deleted successfully', 'success')
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM words WHERE id=%s", (word_id,))
+        conn.commit()
+        cursor.close()
+        flash('Word deleted successfully', 'success')
     except Exception as e:
+        logger.error(f"Admin delete word error: {str(e)}")
         flash(f'Error deleting word: {str(e)}', 'danger')
+    finally:
+        if conn:
+            release_db_connection(conn)
     return redirect(url_for('admin_manage_content'))
 
-@app.route('/admin/fix_file_paths')
-@admin_required
-def fix_file_paths():
-    results = []
-    with sqlite3.connect(DB_NAME) as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT id, file_path FROM submissions WHERE file_path LIKE 'static/uploads%'")
-        submissions = cursor.fetchall()
-        
-        for sub_id, file_path in submissions:
-            # Extract just the filename without the path
-            if '\\' in file_path:
-                filename = file_path.split('\\')[-1]
-            else:
-                filename = file_path.split('/')[-1]
-                
-            results.append(f"ID {sub_id}: {file_path} → {filename}")
-            
-            # Update the database with the corrected path
-            cursor.execute("UPDATE submissions SET file_path = ? WHERE id = ?", (filename, sub_id))
-        
-        conn.commit()
-        
-    return f"""
-    <h2>Fixed {len(results)} file paths</h2>
-    <pre>{'<br>'.join(results)}</pre>
-    <a href="{url_for('admin_submissions')}" class="btn btn-primary">Return to Submissions</a>
-    """
 
 @app.route('/admin/view_submission/<int:submission_id>')
 @admin_required
-def view_submission(submission_id):
+def view_submission(submission_id: int) -> Any:
+    """View and download a user submission."""
+    conn = None
     try:
-        with sqlite3.connect(DB_NAME) as conn:
-            conn.row_factory = sqlite3.Row
-            cursor = conn.cursor()
+        conn = get_db_connection()
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        
+        # Get submission details
+        cursor.execute("""
+            SELECT s.file_path, s.unit_id, s.user_id, u.username
+            FROM submissions s
+            JOIN users u ON s.user_id = u.id
+            WHERE s.id = %s
+        """, (submission_id,))
+        
+        submission = cursor.fetchone()
+        cursor.close()
+        
+        if not submission or not submission['file_path']:
+            flash("Submission file not found in database", "error")
+            return redirect(url_for('admin_submissions'))
+        
+        # Clean up the file path - remove any path prefix if present
+        file_path = submission['file_path']
+        if '\\' in file_path:
+            file_name = file_path.split('\\')[-1]
+        elif '/' in file_path:
+            file_name = file_path.split('/')[-1]
+        else:
+            file_name = file_path
             
-            # Get submission details
-            cursor.execute("""
-                SELECT s.file_path, s.unit_id, s.user_id, u.name as username
-                FROM submissions s
-                JOIN users u ON s.user_id = u.id
-                WHERE s.id = ?
-            """, (submission_id,))
+        # Get full path to file
+        full_path = os.path.join(UPLOAD_FOLDER, file_name)
+        logger.info(f"Attempting to download: {full_path}")
+        
+        if not os.path.exists(full_path):
+            flash(f"File not found on server: {file_name}", "error")
+            return redirect(url_for('admin_submissions'))
+        
+        # Create a descriptive filename for the download
+        download_name = f"Unit{submission['unit_id']}_{submission['username']}_{file_name}"
+        
+        # Send the file with explicit parameters
+        return send_file(
+            full_path,
+            mimetype='application/octet-stream',
+            as_attachment=True,
+            download_name=download_name
+        )
             
-            submission = cursor.fetchone()
-            
-            if not submission or not submission['file_path']:
-                flash("Submission file not found in database", "error")
-                return redirect(url_for('admin_submissions'))
-            
-            # Clean up the file path - remove any path prefix if present
-            file_path = submission['file_path']
-            if '\\' in file_path:
-                file_name = file_path.split('\\')[-1]
-            elif '/' in file_path:
-                file_name = file_path.split('/')[-1]
-            else:
-                file_name = file_path
-                
-            # Get full path to file
-            full_path = os.path.join(UPLOAD_FOLDER, file_name)
-            print(f"Attempting to download: {full_path}")
-            
-            if not os.path.exists(full_path):
-                flash(f"File not found on server: {file_name}", "error")
-                return redirect(url_for('admin_submissions'))
-            
-            # Create a descriptive filename for the download
-            download_name = f"Unit{submission['unit_id']}_{submission['username']}_{file_name}"
-            
-            # Send the file with explicit parameters
-            return send_file(
-                full_path,
-                mimetype='application/octet-stream',
-                as_attachment=True,
-                download_name=download_name
-            )
-                
     except Exception as e:
-        print(f"Download error: {str(e)}")
+        logger.error(f"Download error: {str(e)}")
         flash(f"Error downloading file: {str(e)}", "error")
         return redirect(url_for('admin_submissions'))
+    finally:
+        if conn:
+            release_db_connection(conn)
+
+
+# New routes for documents management
+@app.route('/admin/manage_documents')
+@admin_required
+def admin_manage_documents() -> Any:
+    """Manage documents for Q&A system."""
+    documents = get_document_list()
+    return render_template('admin/manage_documents.html', documents=documents)
+
+
+
+@app.route('/admin/upload_document', methods=['GET', 'POST'])
+@admin_required
+def admin_upload_document() -> Any:
+    """Upload documents for the Q&A system with Llama support."""
+    if request.method == 'POST':
+        # Check if file was uploaded
+        if 'document' not in request.files:
+            flash('No file selected', 'danger')
+            return redirect(request.url)
+            
+        file = request.files['document']
+        
+        # Check if file was selected
+        if file.filename == '':
+            flash('No file selected', 'danger')
+            return redirect(request.url)
+            
+        # Check file extension
+        if file and (file.filename.endswith('.pdf') or 
+                    file.filename.endswith('.ppt') or 
+                    file.filename.endswith('.pptx') or
+                    file.filename.endswith('.txt')):
+            try:
+                # Save file
+                filename = secure_filename(file.filename)
+                file_path = os.path.join(DOCUMENTS_DIR, filename)
+                file.save(file_path)
+                
+                # Reinitialize document QA with Llama support
+                global document_qa
+                document_qa = initialize_document_qa(
+                    documents_dir=DOCUMENTS_DIR,
+                    llama_model_path=LLAMA_MODEL_PATH
+                )
+                
+                flash('Document uploaded and Q&A system updated successfully with Llama model', 'success')
+            except Exception as e:
+                logger.error(f"Error uploading document: {str(e)}")
+                flash(f'Error uploading document: {str(e)}', 'danger')
+        else:
+            flash('Invalid file type. Only PDF, PPT, PPTX, and TXT files are allowed', 'danger')
+            
+        return redirect(url_for('admin_manage_documents'))
+        
+    # Get documents list for display
+    documents = get_document_list()
+    return render_template('admin/upload_document.html', documents=documents)
+
+
+@app.route('/admin/delete_document/<path:filename>')
+@admin_required
+def admin_delete_document(filename: str) -> Any:
+    """Delete a document from the Q&A system."""
+    try:
+        # Security check to prevent directory traversal
+        safe_filename = secure_filename(filename)
+        file_path = os.path.join(DOCUMENTS_DIR, safe_filename)
+        
+        if os.path.exists(file_path):
+            os.remove(file_path)
+            
+            # Rebuild the vector database
+            if any(os.scandir(DOCUMENTS_DIR)):
+                vector_store = VectorStore(DOCUMENTS_DIR, VECTOR_DB_PATH)
+                vector_store.create_vector_db()
+                
+                # Reinitialize document QA
+                global document_qa
+                document_qa = DocumentQA(vector_store.load_vector_db())
+            else:
+                # No documents left, initialize with None for fallback responses
+                document_qa = DocumentQA(None)
+                
+                # Remove vector db folder if it exists
+                if os.path.exists(VECTOR_DB_PATH):
+                    import shutil
+                    shutil.rmtree(VECTOR_DB_PATH)
+                
+            flash("Document deleted and Q&A system updated successfully", "success")
+        else:
+            flash("Document not found", "error")
+    except Exception as e:
+        logger.error(f"Error deleting document: {str(e)}")
+        flash(f"Error deleting document: {str(e)}", "danger")
+        
+    return redirect(url_for('admin_manage_documents'))
+
+
+@app.route('/admin/rebuild_qa_system')
+@admin_required
+def admin_rebuild_qa() -> Any:
+    """Rebuild the Q&A system from scratch with Llama support."""
+    try:
+        # Check if we have documents
+        if any(os.scandir(DOCUMENTS_DIR)):
+            # Reinitialize with Llama support
+            global document_qa
+            document_qa = initialize_document_qa(
+                documents_dir=DOCUMENTS_DIR,
+                llama_model_path=LLAMA_MODEL_PATH
+            )
+            
+            flash("Q&A system rebuilt successfully with Llama model", "success")
+        else:
+            flash("No documents found to build the Q&A system", "warning")
+    except Exception as e:
+        logger.error(f"Error rebuilding QA system: {str(e)}")
+        flash(f"Error rebuilding QA system: {str(e)}", "danger")
+        
+    return redirect(url_for('admin_manage_documents'))
 
 @app.route('/admin/debug_submission/<int:submission_id>')
 @admin_required
-def debug_submission(submission_id):
+def debug_submission(submission_id: int) -> Any:
+    """Debug tool for troubleshooting submission downloads."""
     debug_info = []
     
     try:
         debug_info.append(f"Checking submission ID: {submission_id}")
         
-        with sqlite3.connect(DB_NAME) as conn:
-            conn.row_factory = sqlite3.Row
-            cursor = conn.cursor()
+        conn = get_db_connection()
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        
+        # Get submission details
+        cursor.execute("SELECT file_path, unit_id, user_id FROM submissions WHERE id=%s", (submission_id,))
+        submission = cursor.fetchone()
+        cursor.close()
+        release_db_connection(conn)
+        
+        if not submission:
+            debug_info.append("ERROR: Submission not found in database")
+            return f"<pre>{'<br>'.join(debug_info)}</pre>"
+        
+        debug_info.append(f"Found submission: {dict(submission)}")
+        
+        # Check file path
+        if not submission['file_path']:
+            debug_info.append("ERROR: Submission file_path is empty")
+            return f"<pre>{'<br>'.join(debug_info)}</pre>"
+        
+        # Get user info
+        conn = get_db_connection()
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("SELECT username FROM users WHERE id=%s", (submission['user_id'],))
+        user = cursor.fetchone()
+        cursor.close()
+        release_db_connection(conn)
+        
+        debug_info.append(f"User info: {dict(user) if user else 'Not found'}")
+        
+        # Clean up the file path if needed
+        file_path = submission['file_path']
+        if '\\' in file_path:
+            clean_filename = file_path.split('\\')[-1]
+        elif '/' in file_path:
+            clean_filename = file_path.split('/')[-1]
+        else:
+            clean_filename = file_path
             
-            # Get submission details
-            cursor.execute("SELECT file_path, unit_id, user_id FROM submissions WHERE id=?", (submission_id,))
-            submission = cursor.fetchone()
-            
-            if not submission:
-                debug_info.append("ERROR: Submission not found in database")
-                return f"<pre>{'<br>'.join(debug_info)}</pre>"
-            
-            debug_info.append(f"Found submission: {dict(submission)}")
-            
-            # Check file path
-            if not submission['file_path']:
-                debug_info.append("ERROR: Submission file_path is empty")
-                return f"<pre>{'<br>'.join(debug_info)}</pre>"
-            
-            # Get user info
-            cursor.execute("SELECT name FROM users WHERE id=?", (submission['user_id'],))
-            user = cursor.fetchone()
-            debug_info.append(f"User info: {dict(user) if user else 'Not found'}")
-            
-            # Clean up the file path if needed
-            file_path = submission['file_path']
-            if '\\' in file_path:
-                clean_filename = file_path.split('\\')[-1]
-            elif '/' in file_path:
-                clean_filename = file_path.split('/')[-1]
-            else:
-                clean_filename = file_path
-                
-            # Full path to file
-            full_path = os.path.join(UPLOAD_FOLDER, clean_filename)
-            debug_info.append(f"Original file path: {file_path}")
-            debug_info.append(f"Cleaned filename: {clean_filename}")
-            debug_info.append(f"Full file path: {full_path}")
-            
-            # Check if file exists
-            file_exists = os.path.exists(full_path)
-            debug_info.append(f"File exists: {file_exists}")
-            
-            if not file_exists:
-                debug_info.append(f"UPLOAD_FOLDER is configured as: {UPLOAD_FOLDER}")
-                debug_info.append(f"UPLOAD_FOLDER absolute path: {os.path.abspath(UPLOAD_FOLDER)}")
-                debug_info.append(f"Files in upload folder: {os.listdir(UPLOAD_FOLDER)}")
-                return f"<pre>{'<br>'.join(debug_info)}</pre>"
-            
-            # File information
-            file_size = os.path.getsize(full_path)
-            debug_info.append(f"File size: {file_size} bytes")
-            
-            # Create direct download link
-            direct_link = f"/admin/stream_file/{clean_filename}"
-            debug_info.append(f"Direct download link: {direct_link}")
-            
-            html = f"""
-            <pre>{'<br>'.join(debug_info)}</pre>
-            <hr>
-            <a href="{direct_link}" style="padding: 10px; background: blue; color: white; text-decoration: none;">
-                Direct Download
-            </a>
-            <hr>
-            <a href="{url_for('admin_submissions')}" style="padding: 10px; background: gray; color: white; text-decoration: none;">
-                Back to Submissions
-            </a>
-            """
-            return html
-            
+        # Full path to file
+        full_path = os.path.join(UPLOAD_FOLDER, clean_filename)
+        debug_info.append(f"Original file path: {file_path}")
+        debug_info.append(f"Cleaned filename: {clean_filename}")
+        debug_info.append(f"Full file path: {full_path}")
+        
+        # Check if file exists
+        file_exists = os.path.exists(full_path)
+        debug_info.append(f"File exists: {file_exists}")
+        
+        if not file_exists:
+            debug_info.append(f"UPLOAD_FOLDER is configured as: {UPLOAD_FOLDER}")
+            debug_info.append(f"UPLOAD_FOLDER absolute path: {os.path.abspath(UPLOAD_FOLDER)}")
+            debug_info.append(f"Files in upload folder: {os.listdir(UPLOAD_FOLDER)}")
+            return f"<pre>{'<br>'.join(debug_info)}</pre>"
+        
+        # File information
+        file_size = os.path.getsize(full_path)
+        debug_info.append(f"File size: {file_size} bytes")
+        
+        # Create direct download link
+        direct_link = f"/admin/stream_file/{clean_filename}"
+        debug_info.append(f"Direct download link: {direct_link}")
+        
+        html = f"""
+        <pre>{'<br>'.join(debug_info)}</pre>
+        <hr>
+        <a href="{direct_link}" style="padding: 10px; background: blue; color: white; text-decoration: none;">
+            Direct Download
+        </a>
+        <hr>
+        <a href="{url_for('admin_submissions')}" style="padding: 10px; background: gray; color: white; text-decoration: none;">
+            Back to Submissions
+        </a>
+        """
+        return html
+        
     except Exception as e:
         debug_info.append(f"ERROR: {str(e)}")
         return f"<pre>{'<br>'.join(debug_info)}</pre>"
 
+
 @app.route('/admin/stream_file/<path:filename>')
 @admin_required
-def stream_file(filename):
-    """Stream a file directly to the browser"""
+def stream_file(filename: str) -> Any:
+    """Stream a file directly to the browser."""
     try:
         # Extract just the filename portion if it contains path elements
         if '\\' in filename:
@@ -2324,15 +4386,24 @@ def stream_file(filename):
         )
         
     except Exception as e:
-        print(f"Stream error: {str(e)}")
+        logger.error(f"Stream error: {str(e)}")
         return f"Error: {str(e)}", 500
 
+
 @app.errorhandler(404)
-def page_not_found(e):
+def page_not_found(e: Exception) -> tuple:
+    """Handle 404 errors."""
     return render_template('error.html', message="Page not found"), 404
+# Custom Jinja2 filter to replace newlines with <br>
+@app.template_filter('nl2br')
+def nl2br_filter(s):
+    if s is None:
+        return ""
+    return s.replace("\n", "<br>")
 
 @app.errorhandler(500)
-def internal_server_error(e):
+def internal_server_error(e: Exception) -> tuple:
+    """Handle 500 errors."""
     return render_template('error.html', message="Internal server error"), 500
 
 if __name__ == '__main__':
@@ -2344,5 +4415,6 @@ if __name__ == '__main__':
         print("Database initialized with sample data.")
     else:
         print("Using existing database.")
+        # Check and create words table if it doesn't exist
         check_and_create_words_table()
-    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 8080)), debug=True)
+    app.run(debug=True)

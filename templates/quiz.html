@@ -58,6 +58,7 @@
 {% endblock %}
 
 {% block additional_css %}
+<style>
 .custom-control-input:checked ~ .custom-control-label::before {
     background-color: var(--accent-color);
     border-color: var(--accent-color);
@@ -88,5 +89,31 @@
 
 .motivation-card {
     background: linear-gradient(135deg, #673ab7, #9c27b0);
+    padding: 20px;
+    border-radius: 10px;
+    color: white;
 }
+
+.motivation-card h5 {
+    color: white;
+}
+
+.quiz-card {
+    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+}
+
+.question-card {
+    border-left: 4px solid var(--accent-color);
+}
+
+.animate-pulse {
+    animation: pulse 2s infinite;
+}
+
+@keyframes pulse {
+    0% { transform: scale(1); }
+    50% { transform: scale(1.05); }
+    100% { transform: scale(1); }
+}
+</style>
 {% endblock %}

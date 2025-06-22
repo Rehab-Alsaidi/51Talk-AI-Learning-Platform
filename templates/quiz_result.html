@@ -54,7 +54,7 @@
             <h4 class="mb-3 mt-5"><i class="fas fa-clipboard-check mr-2"></i>Question Review</h4>
 
             {% for result in results %}
-            <div class="card mb-4 question-review animate-slideUp" style="animation-delay: '{{ result.animation_delay }}s';">
+            <div class="card mb-4 question-review animate-slideUp" style="animation-delay: {{ result.animation_delay }}s;">
                 <div class="card-header {% if result.correct %}bg-success{% else %}bg-danger{% endif %} text-white">
                     <h5 class="mb-0">
                         <span class="badge badge-light mr-2">{{ loop.index }}</span>
@@ -101,6 +101,14 @@
 {% endblock %}
 
 {% block additional_css %}
+<style>
+.motivation-card {
+    padding: 20px;
+    border-radius: 10px;
+    color: white;
+    text-align: center;
+}
+
 .score-circle {
     position: relative;
     width: 150px;
@@ -110,6 +118,7 @@
     margin: 0 auto;
     box-shadow: 0 0 15px rgba(0,0,0,0.3);
 }
+
 .score-circle::before {
     content: '';
     position: absolute;
@@ -121,6 +130,7 @@
     background: #232323;
     z-index: 1;
 }
+
 .score-circle::after {
     content: '';
     position: absolute;
@@ -135,6 +145,7 @@
     -webkit-mask: radial-gradient(transparent 65%, black 66%);
     z-index: 2;
 }
+
 .score-circle-inner {
     position: absolute;
     top: 50%;
@@ -143,56 +154,90 @@
     z-index: 2;
     text-align: center;
 }
+
 .score-value {
     font-size: 2rem;
     font-weight: 700;
     /* color is set inline in the HTML */
 }
+
 .score-label {
     font-size: 1rem;
     color: var(--text-color);
     opacity: 0.8;
 }
+
 .options-review {
     display: flex;
     flex-direction: column;
     gap: 10px;
 }
+
 .option-item {
     padding: 12px 15px;
     border-radius: 8px;
     position: relative;
     transition: all 0.3s;
 }
+
 .option-item.correct {
     background-color: rgba(76, 175, 80, 0.2);
     border: 1px solid rgba(76, 175, 80, 0.5);
 }
+
 .option-item.incorrect {
     background-color: rgba(207, 102, 121, 0.2);
     border: 1px solid rgba(207, 102, 121, 0.5);
 }
+
 .option-icon {
     position: absolute;
     right: 15px;
     top: 50%;
     transform: translateY(-50%);
 }
+
 .option-icon.correct {
     color: var(--success-color);
 }
+
 .option-icon.incorrect {
     color: var(--danger-color);
 }
+
 .explanation {
     background-color: var(--background-color, rgba(255, 255, 255, 0.05));
     padding: 15px;
     border-radius: 8px;
     border-left: 4px solid var(--accent-color);
 }
+
+.question-review {
+    transition: transform 0.3s ease;
+}
+
 .question-review:hover {
     transform: translateY(-5px);
 }
+
+.animate-fadeIn {
+    animation: fadeIn 0.6s ease-in-out;
+}
+
+.animate-slideUp {
+    animation: slideUp 0.6s ease-in-out;
+}
+
+@keyframes fadeIn {
+    from { opacity: 0; transform: translateY(20px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes slideUp {
+    from { opacity: 0; transform: translateY(30px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+</style>
 {% endblock %}
 
 {% block scripts %}

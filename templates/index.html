@@ -9,16 +9,22 @@
     </div>
     <div class="card-body">
         <p>Start your journey in artificial intelligence with our interactive learning modules.</p>
-        
-        <form method="POST" class="mt-4">
-            <div class="form-group">
-                <label for="username" class="form-label">Enter your name to begin:</label>
-                <input type="text" class="form-control" id="username" name="username" required placeholder="Your name">
-            </div>
-            <button type="submit" class="btn btn-primary">
-                <i class="fas fa-rocket"></i> Start Learning
-            </button>
-        </form>
+        {% if not session.get('user_id') %}
+        <div class="text-center mt-4">
+            <a href="{{ url_for('login') }}" class="btn btn-primary btn-lg mr-3">
+                <i class="fas fa-sign-in-alt"></i> Login
+            </a>
+            <a href="{{ url_for('register') }}" class="btn btn-success btn-lg">
+                <i class="fas fa-user-plus"></i> Register
+            </a>
+        </div>
+        {% else %}
+        <div class="text-center mt-4">
+            <a href="{{ url_for('dashboard') }}" class="btn btn-primary btn-lg">
+                <i class="fas fa-tachometer-alt"></i> Go to Dashboard
+            </a>
+        </div>
+        {% endif %}
     </div>
 </div>
 
