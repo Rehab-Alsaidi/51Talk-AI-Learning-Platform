@@ -1,21 +1,4 @@
-Your README markdown is **already very well-formatted** for GitHub! 👏
-However, here are a few **small fixes** to improve GitHub compatibility and rendering:
 
----
-
-### ✅ Final Adjustments (Just Copy-Paste This Version)
-
-1. **Remove unnecessary `<div>` and `<h3>` inside markdown blocks** — GitHub markdown doesn't render `<div align="center">` or `<h3>` consistently.
-2. **Replace HTML blocks with markdown alternatives** like `###` or centered images using tables.
-3. **Ensure proper escaping and spacing.**
-
----
-
-### ✅ Fixed & GitHub-Optimized Version (ready to paste into `README.md`):
-
-👉 [Click here to download the cleaned version as a `.md` file](https://gist.githubusercontent.com/) *(if you'd like a direct link, I can generate that too).*
-
-Or copy from below:
 
 ````markdown
 # 🌟 51Talk AI Learning Platform
