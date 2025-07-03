@@ -600,19 +600,6 @@ git push origin feature/amazing-feature
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
-## 🆘 Support & Community
-
-### **Get Help**
-- **📧 Email**: support@51talk-ai.com
-- **🐛 Bug Reports**: [GitHub Issues](https://github.com/yourusername/51talk-ai-learning/issues)
-- **💬 Community**: [Discord Server](https://discord.gg/51talk)
-- **📖 Documentation**: [Wiki](https://github.com/yourusername/51talk-ai-learning/wiki)
-
-### **Resources**
-- **🎥 Video Tutorials**: [YouTube Channel](https://youtube.com/51talk-ai)
-- **📝 Blog**: [Development Blog](https://blog.51talk-ai.com)
-- **🐦 Updates**: [@51talk_ai](https://twitter.com/51talk_ai)
-- **💼 LinkedIn**: [Company Page](https://linkedin.com/company/51talk-ai)
 
 ## 🔄 Updates and Roadmap
 
@@ -639,13 +626,6 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 - 🔄 **Blockchain**: Certified learning achievements
 - 🔄 **Multi-tenancy**: Support for multiple institutions
 
-## 🏆 Achievements
-
-- 🌟 **Innovation Award**: Best AI Education Platform 2024
-- 🏅 **Developer Choice**: Most Loved Learning Tool
-- 🎯 **User Experience**: Excellence in Educational Design
-- 🚀 **Performance**: 99.9% uptime in production
-- 👥 **Community**: 1000+ active users and growing
 
 ---
 
