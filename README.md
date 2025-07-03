@@ -1,57 +1,93 @@
 # 51Talk AI Learning Platform
 
-A comprehensive Flask-based learning management system with AI-powered assistance, multilingual support, and quiz functionality. This platform provides interactive learning experiences with document-based Q&A, team management, progress tracking, and administrative tools.
+The 51Talk AI Learning Platform is a cutting-edge educational web application that combines the power of artificial intelligence with modern learning methodologies. Built with Flask and powered by HuggingFace's advanced language models, this platform offers personalized learning experiences across multiple languages and cultural contexts.
 
 ![Platform Preview](https://img.shields.io/badge/Python-3.8+-blue.svg)
 ![Flask](https://img.shields.io/badge/Flask-2.3+-green.svg)
 ![PostgreSQL](https://img.shields.io/badge/PostgreSQL-13+-blue.svg)
 ![Docker](https://img.shields.io/badge/Docker-Compose-blue.svg)
 
-## 🌟 Features
+🌟 Features
+🎓 Advanced Learning Management
 
-### 🎓 Learning Management
-- **Interactive Units**: Structured learning units with materials, videos, vocabulary, and projects
-- **AI Vocabulary System**: Detailed word explanations with metaphors, visual explanations, and real-world connections
-- **Progress Tracking**: Comprehensive user progress monitoring with completion percentages
-- **Project Submissions**: File upload system for project assignments
+Interactive Learning Units: Structured learning units with materials, videos, vocabulary, and projects
+AI-Powered Vocabulary System: Detailed word explanations with metaphors, visual explanations, and real-world connections
+Progress Tracking: Comprehensive user progress monitoring with completion percentages and analytics
+Project Submissions: Secure file upload system for project assignments with camp-based filtering
+Multi-Camp System: Separate learning tracks for Middle East and Chinese camps with tailored content
 
-### 🧠 AI-Powered Features
-- **Document Q&A**: AI assistant powered by Llama model for course material questions
-- **Multilingual Support**: English, Chinese (中文), and Arabic (العربية) interface
-- **Smart Responses**: Context-aware answers based on uploaded course documents
+🧠 AI-Powered Features
 
-### 📝 Assessment System
-- **One-Time Quizzes**: Single-attempt quiz system with comprehensive review
-- **Detailed Feedback**: Question-by-question explanations and correct answer highlighting
-- **Scoring System**: Automatic grading with pass/fail determination
-- **Review Mode**: Post-quiz review showing user answers vs. correct answers
+Enhanced Document Q&A: AI assistant powered by HuggingFace models for intelligent course material questions
+Conversation Memory: Context-aware responses that remember previous interactions
+Smart Document Processing: Automatic processing of PDF, PowerPoint, and text documents
+Multilingual AI Support: AI responses in English, Chinese (中文), and Arabic (العربية)
+Fallback Systems: Robust error handling with graceful degradation
 
-### 👥 Team Management
-- **Team Creation**: Organize users into teams (Middle East and Chinese camps)
-- **Team Scoring**: Automatic team score updates based on individual performance
-- **Leaderboards**: Team ranking systems for competitive learning
+📝 Advanced Assessment System
 
-### 🔐 User Management
-- **Secure Authentication**: Email verification, password reset functionality
-- **Role-Based Access**: User and admin role separation
-- **Profile Management**: User language preferences and settings
+One-Time Quiz System: Single-attempt quiz system with comprehensive review functionality
+Detailed Feedback: Question-by-question explanations with correct answer highlighting
+Smart Scoring: Automatic grading with configurable pass/fail thresholds
+Review Mode: Post-quiz review showing user answers vs. correct answers with explanations
+Camp-Based Quizzes: Tailored quizzes for different learning camps
 
-### 📊 Administrative Tools
-- **Content Management**: Add/edit quizzes, materials, videos, projects, and vocabulary
-- **User Analytics**: Export user data, progress reports, and feedback
-- **Document Management**: Upload and manage course materials for AI assistant
-- **System Monitoring**: Statistics dashboard and user activity tracking
+👥 Team Management & Collaboration
+
+Team Creation: Organize users into competitive teams with camp-based organization
+Automatic Scoring: Team score updates based on individual quiz performance
+Leaderboards: Real-time team ranking systems for competitive learning
+Team Analytics: Comprehensive team performance tracking and reporting
+
+🔐 Enterprise-Grade Security
+
+Secure Authentication: Email verification, password reset, and secure session management
+Role-Based Access: Granular user and admin role separation
+Rate Limiting: API endpoint protection against abuse
+Input Validation: Comprehensive XSS and injection attack prevention
+Environment Validation: Startup-time configuration validation
+
+📊 Comprehensive Administrative Tools
+
+Content Management: Add/edit quizzes, materials, videos, projects, and AI vocabulary
+User Analytics: Export user data, progress reports, and detailed feedback analysis
+Document Management: Upload and manage course materials for AI assistant processing
+System Monitoring: Real-time statistics dashboard and user activity tracking
+Health Checks: Application health monitoring and metrics collection
+
+🚀 Production-Ready Features
+
+Railway Deployment: One-click deployment to Railway platform
+Docker Support: Full containerization with Docker Compose
+Database Pooling: Optimized PostgreSQL connection management
+Error Handling: Comprehensive error tracking and graceful failure handling
+Performance Monitoring: Built-in metrics and performance tracking
+Thread Safety: Concurrent request handling with thread-safe operations
 
 ## 🛠️ Technology Stack
+Backend
 
-- **Backend**: Flask (Python 3.8+)
-- **Database**: PostgreSQL 13+
-- **AI/ML**: Llama 3 model integration for Q&A
-- **Frontend**: Bootstrap 5, Jinja2 templates
-- **Email**: Flask-Mail for notifications
-- **File Processing**: PDF, PowerPoint, Word document support
-- **Containerization**: Docker & Docker Compose
-- **Authentication**: Werkzeug security utilities
+Framework: Flask 2.3.3 with production-ready configuration
+Database: PostgreSQL 15+ with connection pooling
+AI/ML: HuggingFace Transformers, LangChain, FAISS Vector Store
+Authentication: Werkzeug security with email verification
+Email: Flask-Mail for notifications and verification
+Rate Limiting: Flask-Limiter for API protection
+
+Frontend
+
+Template Engine: Jinja2 with multi-language support
+Styling: Bootstrap 5, custom CSS3
+JavaScript: Vanilla JS with modern ES6+ features
+Responsive Design: Mobile-first approach with touch-friendly interface
+
+AI & Data Processing
+
+Language Models: HuggingFace API integration (Llama-3-8B-Instruct)
+Document Processing: PDF, PowerPoint, Word, and text file support
+Vector Database: FAISS for efficient similarity search
+Embeddings: Sentence transformers for semantic understanding
+
 
 ## 📋 Prerequisites
 
